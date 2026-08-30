@@ -39,6 +39,33 @@ SRC
 "$C_BIN" fetch
 [ -f c.lock ]
 "$C_BIN" deps | grep -q 'answer'
+
+src_cache="$(find "$C_CACHE_DIR/src" -mindepth 1 -maxdepth 1 -type d | head -n 1)"
+mirror_cache="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*.git' | head -n 1)"
+[ -n "$src_cache" ]
+[ -n "$mirror_cache" ]
+[ -f "$src_cache.c-ready" ]
+[ -f "$mirror_cache.c-ready" ]
+
+# A failed checkout used to leave this directory behind and permanently poison
+# the cache. Replace a known-good checkout with a partial one and require c to
+# rebuild it automatically rather than trusting directory existence.
+rm -rf "$src_cache" "$src_cache.c-ready"
+mkdir -p "$src_cache"
+printf '#define ANSWER 0\n' > "$src_cache/answer.h"
+"$C_BIN" run | grep -q '^42$'
+[ -f "$src_cache.c-ready" ]
+grep -q 'ANSWER 42' "$src_cache/answer.h"
+
+# A failed `git clone --mirror` has the same failure mode. A malformed mirror
+# directory must be discarded and cloned again on the next invocation.
+rm -rf "$mirror_cache" "$mirror_cache.c-ready"
+mkdir -p "$mirror_cache"
+printf 'not-a-git-repository\n' > "$mirror_cache/HEAD"
+"$C_BIN" fetch >/dev/null
+[ -f "$mirror_cache.c-ready" ]
+git --git-dir="$mirror_cache" rev-parse --verify 'HEAD^{commit}' >/dev/null
+
 "$C_BIN" run | grep -q '^42$'
 old="$(grep resolved c.lock)"
 
