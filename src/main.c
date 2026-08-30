@@ -182,9 +182,11 @@ static void mkdir_p(const char *path) {
 }
 
 static int remove_tree(const char *path) {
-    if (!file_exists(path)) return 0;
+    struct stat root;
+    if (lstat(path, &root) != 0) return errno == ENOENT ? 0 : -1;
+    if (!S_ISDIR(root.st_mode) || S_ISLNK(root.st_mode)) return unlink(path);
     DIR *d = opendir(path);
-    if (!d) return unlink(path);
+    if (!d) return -1;
     struct dirent *ent;
     char child[PATH_MAX];
     int rc = 0;
@@ -193,13 +195,90 @@ static int remove_tree(const char *path) {
         path_join(child, path, ent->d_name);
         struct stat st;
         if (lstat(child, &st) != 0) { rc = -1; break; }
-        if (S_ISDIR(st.st_mode)) rc = remove_tree(child);
+        if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) rc = remove_tree(child);
         else rc = unlink(child);
         if (rc != 0) break;
     }
+    int saved = errno;
     closedir(d);
+    errno = saved;
     if (rc == 0) rc = rmdir(path);
     return rc;
+}
+
+static bool path_exists_nofollow(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0;
+}
+
+static bool is_real_dir(const char *path) {
+    struct stat st;
+    return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode);
+}
+
+static void ready_marker_path(const char *entry, char out[PATH_MAX]) {
+    if (snprintf(out, PATH_MAX, "%s.c-ready", entry) >= PATH_MAX) die("cache marker path too long: %s", entry);
+}
+
+static bool text_file_equals(const char *path, const char *expected) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[C_MAX_PATH + 256];
+    bool ok = fgets(line, sizeof(line), f) != NULL;
+    if (ok) {
+        size_t n = strlen(line);
+        while (n && (line[n - 1] == '\n' || line[n - 1] == '\r')) line[--n] = '\0';
+        ok = !strcmp(line, expected);
+    }
+    if (ok) {
+        int ch;
+        while ((ch = fgetc(f)) != EOF) if (ch != '\n' && ch != '\r' && ch != ' ' && ch != '\t') { ok = false; break; }
+    }
+    fclose(f);
+    return ok;
+}
+
+static void write_text_file_atomic(const char *path, const char *text) {
+    char temp[PATH_MAX];
+    if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(temp))
+        die("atomic file path too long: %s", path);
+    FILE *f = fopen(temp, "w");
+    if (!f) die("cannot create temporary file %s: %s", temp, strerror(errno));
+    bool ok = fprintf(f, "%s\n", text ? text : "") >= 0 && fflush(f) == 0;
+    if (ok && fsync(fileno(f)) != 0) ok = false;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) { unlink(temp); die("cannot finish temporary file %s", temp); }
+    if (rename(temp, path) != 0) { int saved = errno; unlink(temp); errno = saved; die("cannot publish %s: %s", path, strerror(errno)); }
+}
+
+static bool ready_marker_matches(const char *entry, const char *value) {
+    char marker[PATH_MAX];
+    ready_marker_path(entry, marker);
+    return text_file_equals(marker, value);
+}
+
+static void write_ready_marker(const char *entry, const char *value) {
+    char marker[PATH_MAX];
+    ready_marker_path(entry, marker);
+    write_text_file_atomic(marker, value);
+}
+
+static void remove_ready_marker(const char *entry) {
+    char marker[PATH_MAX];
+    ready_marker_path(entry, marker);
+    if (unlink(marker) != 0 && errno != ENOENT) die("cannot remove cache marker %s: %s", marker, strerror(errno));
+}
+
+static void remove_cache_entry(const char *entry) {
+    remove_ready_marker(entry);
+    if (remove_tree(entry) != 0 && errno != ENOENT) die("cannot remove cache entry %s: %s", entry, strerror(errno));
+}
+
+static void make_private_temp_dir(const char *final_path, char temp[PATH_MAX]) {
+    if (snprintf(temp, PATH_MAX, "%s.tmp.%ld", final_path, (long)getpid()) >= PATH_MAX)
+        die("temporary directory path too long: %s", final_path);
+    if (remove_tree(temp) != 0 && errno != ENOENT) die("cannot clear temporary directory %s: %s", temp, strerror(errno));
+    if (mkdir(temp, 0700) != 0) die("cannot create temporary directory %s: %s", temp, strerror(errno));
 }
 
 static int run_process(StrVec *args, bool verbose, const char *cwd) {
@@ -254,6 +333,63 @@ static char *capture_process(StrVec *args, const char *cwd) {
     while (len && (buf[len - 1] == '\n' || buf[len - 1] == '\r' || buf[len - 1] == ' ')) buf[--len] = '\0';
     if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) { free(buf); return NULL; }
     return buf;
+}
+
+static bool git_mirror_valid(const char *mirror) {
+    if (!is_real_dir(mirror)) return false;
+    StrVec bare = {0};
+    vec_push(&bare, "git"); vec_push(&bare, "--git-dir"); vec_push(&bare, mirror);
+    vec_push(&bare, "rev-parse"); vec_push(&bare, "--is-bare-repository");
+    char *result = capture_process(&bare, NULL); vec_free(&bare);
+    bool ok = result && !strcmp(result, "true");
+    free(result);
+    if (!ok) return false;
+    StrVec fsck = {0};
+    vec_push(&fsck, "git"); vec_push(&fsck, "--git-dir"); vec_push(&fsck, mirror);
+    vec_push(&fsck, "fsck"); vec_push(&fsck, "--connectivity-only");
+    int rc = run_process(&fsck, false, NULL); vec_free(&fsck);
+    return rc == 0;
+}
+
+static bool git_mirror_has_commit(const char *mirror, const char *resolved) {
+    char expr[128];
+    if (snprintf(expr, sizeof(expr), "%s^{commit}", resolved) >= (int)sizeof(expr)) return false;
+    StrVec a = {0};
+    vec_push(&a, "git"); vec_push(&a, "--git-dir"); vec_push(&a, mirror);
+    vec_push(&a, "cat-file"); vec_push(&a, "-e"); vec_push(&a, expr);
+    int rc = run_process(&a, false, NULL); vec_free(&a);
+    return rc == 0;
+}
+
+static int git_fetch_mirror(const char *mirror, const Options *opt) {
+    StrVec fetch = {0};
+    vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror);
+    vec_push(&fetch, "fetch"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
+    int rc = run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
+    return rc;
+}
+
+static int run_process_atomic_output(StrVec *args, bool verbose, const char *output) {
+    char temp_dir[PATH_MAX];
+    if (snprintf(temp_dir, sizeof(temp_dir), "%s.tmp.XXXXXX", output) >= (int)sizeof(temp_dir)) return 1;
+    if (!mkdtemp(temp_dir)) return 1;
+    char temp_output[PATH_MAX]; path_join(temp_output, temp_dir, "artifact");
+    bool replaced = false;
+    for (size_t i = 0; i < args->count; ++i) {
+        if (!strcmp(args->items[i], output)) {
+            free(args->items[i]);
+            args->items[i] = xstrdup(temp_output);
+            replaced = true;
+        }
+    }
+    if (!replaced) { remove_tree(temp_dir); errno = EINVAL; return 1; }
+    int rc = run_process(args, verbose, NULL);
+    if (rc == 0 && rename(temp_output, output) != 0) rc = 1;
+    int saved = errno;
+    (void)remove_tree(temp_dir);
+    errno = saved;
+    if (rc == 0) write_ready_marker(output, "artifact");
+    return rc;
 }
 
 static const char *home_dir(void) {
@@ -475,15 +611,20 @@ static void load_lock(LockFile *lock) {
 
 static void save_lock(const LockFile *lock) {
     if (lock->count == 0) return;
-    FILE *f = fopen("c.lock", "w");
-    if (!f) die("cannot write c.lock: %s", strerror(errno));
+    char temp[PATH_MAX];
+    if (snprintf(temp, sizeof(temp), "c.lock.tmp.%ld", (long)getpid()) >= (int)sizeof(temp)) die("lockfile temp path too long");
+    FILE *f = fopen(temp, "w");
+    if (!f) die("cannot write temporary c.lock: %s", strerror(errno));
     fprintf(f, "# Generated by c. Commit this file.\n\n");
     for (size_t i = 0; i < lock->count; ++i) {
         const LockEntry *e = &lock->entries[i];
         fprintf(f, "[[dependency]]\nname = \"%s\"\nurl = \"%s\"\nrequested = \"%s\"\nresolved = \"%s\"\n\n",
                 e->name, e->url, e->requested, e->resolved);
     }
-    fclose(f);
+    bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+    if (fclose(f) != 0) ok = false;
+    if (!ok) { unlink(temp); die("cannot finish c.lock"); }
+    if (rename(temp, "c.lock") != 0) { int saved = errno; unlink(temp); errno = saved; die("cannot publish c.lock: %s", strerror(errno)); }
 }
 
 static LockEntry *lock_for(LockFile *lock, const C_Dependency *d) {
@@ -499,11 +640,39 @@ static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mi
     cache_root(cache); path_join(repos, cache, "git"); mkdir_p(repos); hash_hex(d->git, h);
     char mirror_name[32]; snprintf(mirror_name, sizeof(mirror_name), "%s.git", h);
     path_join(mirror, repos, mirror_name);
-    if (!is_dir(mirror)) {
+
+    if (path_exists_nofollow(mirror)) {
+        if (!is_real_dir(mirror)) {
+            note("RECOVER", "%s mirror", d->name);
+            remove_cache_entry(mirror);
+        } else if (!ready_marker_matches(mirror, d->git)) {
+            if (git_mirror_valid(mirror)) write_ready_marker(mirror, d->git);
+            else {
+                note("RECOVER", "%s mirror", d->name);
+                remove_cache_entry(mirror);
+            }
+        }
+    }
+
+    if (!is_real_dir(mirror)) {
+        char temp[PATH_MAX]; make_private_temp_dir(mirror, temp);
         note("FETCH", "%s", d->name);
-        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, d->git); vec_push(&a, mirror);
-        if (run_process(&a, opt->verbose, NULL) != 0) die("failed to clone %s", d->git);
-        vec_free(&a);
+        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, d->git); vec_push(&a, temp);
+        int rc = run_process(&a, opt->verbose, NULL); vec_free(&a);
+        if (rc != 0 || !git_mirror_valid(temp)) {
+            (void)remove_tree(temp);
+            die("failed to clone %s", d->git);
+        }
+        if (rename(temp, mirror) != 0) {
+            int saved = errno;
+            (void)remove_tree(temp);
+            if (!is_real_dir(mirror) || !ready_marker_matches(mirror, d->git)) {
+                errno = saved;
+                die("cannot publish git mirror for %s: %s", d->name, strerror(errno));
+            }
+        } else {
+            write_ready_marker(mirror, d->git);
+        }
     }
 }
 
@@ -512,8 +681,7 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
     ensure_git_mirror(d, opt, mirror);
     LockEntry *e = lock_for(lock, d);
     if (!e) {
-        StrVec fetch = {0}; vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror); vec_push(&fetch, "fetch"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
-        (void)run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
+        if (git_fetch_mirror(mirror, opt) != 0) die("failed to fetch %s", d->git);
 
         StrVec rev = {0}; vec_push(&rev, "git"); vec_push(&rev, "--git-dir"); vec_push(&rev, mirror); vec_push(&rev, "rev-parse");
         char refexpr[C_MAX_NAME + 16]; snprintf(refexpr, sizeof(refexpr), "%s^{commit}", d->ref); vec_push(&rev, refexpr);
@@ -533,6 +701,11 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
         free(resolved);
     }
     snprintf(state->resolved, sizeof(state->resolved), "%s", e->resolved);
+    if (!git_mirror_has_commit(mirror, e->resolved)) {
+        note("RECOVER", "%s mirror objects", d->name);
+        if (git_fetch_mirror(mirror, opt) != 0 || !git_mirror_has_commit(mirror, e->resolved))
+            die("cached mirror for %s does not contain locked commit %s", d->name, e->resolved);
+    }
 
     char cache[PATH_MAX], srcroot[PATH_MAX], pkgroot[PATH_MAX], key_input[C_MAX_PATH + 256], key[17];
     cache_root(cache); path_join(srcroot, cache, "src"); path_join(pkgroot, cache, "pkg"); mkdir_p(srcroot); mkdir_p(pkgroot);
@@ -559,21 +732,42 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
     char pkg_key[17]; hash_u64_hex(artifact_hash, pkg_key);
     char pkg_name[C_MAX_NAME + 32]; snprintf(pkg_name, sizeof(pkg_name), "%s-%s", d->name, pkg_key);
     path_join(state->package, pkgroot, pkg_name);
-    if (!is_dir(state->source)) {
-        mkdir_p(state->source);
-        StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, state->source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--"); vec_push(&co, ".");
-        if (run_process(&co, opt->verbose, NULL) != 0) die("failed to checkout %s", d->name);
-        vec_free(&co);
+    if (path_exists_nofollow(state->source) && (!is_real_dir(state->source) || !ready_marker_matches(state->source, e->resolved))) {
+        note("RECOVER", "%s checkout", d->name);
+        remove_cache_entry(state->source);
+    }
+    if (!is_real_dir(state->source)) {
+        char temp_source[PATH_MAX]; make_private_temp_dir(state->source, temp_source);
+        StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, temp_source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--"); vec_push(&co, ".");
+        int rc = run_process(&co, opt->verbose, NULL); vec_free(&co);
+        if (rc != 0) {
+            (void)remove_tree(temp_source);
+            if (!git_mirror_valid(mirror)) remove_ready_marker(mirror);
+            die("failed to checkout %s", d->name);
+        }
+        if (rename(temp_source, state->source) != 0) {
+            int saved = errno;
+            (void)remove_tree(temp_source);
+            if (!is_real_dir(state->source) || !ready_marker_matches(state->source, e->resolved)) {
+                errno = saved;
+                die("cannot publish checkout for %s: %s", d->name, strerror(errno));
+            }
+        } else {
+            write_ready_marker(state->source, e->resolved);
+        }
     }
 
     if (build_artifacts && d->kind == C_DEP_CMAKE) {
         char stamp[PATH_MAX]; path_join(stamp, state->package, ".c-built");
-        if (!file_exists(stamp)) {
+        bool package_ready = is_real_dir(state->package) && text_file_equals(stamp, e->resolved);
+        if (!package_ready) {
             char buildroot[PATH_MAX], bdir[PATH_MAX], src[PATH_MAX];
             path_join(buildroot, cache, "dep-build"); mkdir_p(buildroot);
             char build_name[C_MAX_NAME + 32]; snprintf(build_name, sizeof(build_name), "%s-%s", d->name, pkg_key);
             path_join(bdir, buildroot, build_name);
             snprintf(src, PATH_MAX, "%s%s%s", state->source, d->subdir[0] ? "/" : "", d->subdir);
+            if (path_exists_nofollow(bdir) && remove_tree(bdir) != 0) die("cannot clear dependency build directory: %s", bdir);
+            if (path_exists_nofollow(state->package)) remove_cache_entry(state->package);
             mkdir_p(bdir); mkdir_p(state->package);
             note("DEP", "%s", d->name);
             StrVec cm = {0}; vec_push(&cm, "cmake"); vec_push(&cm, "-S"); vec_push(&cm, src); vec_push(&cm, "-B"); vec_push(&cm, bdir);
@@ -582,17 +776,18 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
             char prefix[PATH_MAX + 64]; snprintf(prefix, sizeof(prefix), "-DCMAKE_INSTALL_PREFIX=%s", state->package); vec_push(&cm, prefix);
             vec_push(&cm, "-DBUILD_SHARED_LIBS=OFF");
             for (size_t j = 0; j < d->cmake_options.count; ++j) vec_push(&cm, d->cmake_options.items[j]);
-            if (run_process(&cm, opt->verbose, NULL) != 0) die("cmake configure failed for %s", d->name);
+            if (run_process(&cm, opt->verbose, NULL) != 0) { vec_free(&cm); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake configure failed for %s", d->name); }
             vec_free(&cm);
             StrVec build = {0}; vec_push(&build, "cmake"); vec_push(&build, "--build"); vec_push(&build, bdir); vec_push(&build, "--config"); vec_push(&build, opt->release ? "Release" : "Debug");
-            if (run_process(&build, opt->verbose, NULL) != 0) die("cmake build failed for %s", d->name);
+            if (run_process(&build, opt->verbose, NULL) != 0) { vec_free(&build); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake build failed for %s", d->name); }
             vec_free(&build);
             StrVec install = {0}; vec_push(&install, "cmake"); vec_push(&install, "--install"); vec_push(&install, bdir); vec_push(&install, "--config"); vec_push(&install, opt->release ? "Release" : "Debug");
-            if (run_process(&install, opt->verbose, NULL) != 0) die("cmake install failed for %s", d->name);
+            if (run_process(&install, opt->verbose, NULL) != 0) { vec_free(&install); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake install failed for %s", d->name); }
             vec_free(&install);
-            FILE *sf = fopen(stamp, "w"); if (sf) { fprintf(sf, "%s\n", e->resolved); fclose(sf); }
+            write_text_file_atomic(stamp, e->resolved);
         }
     }
+
 }
 
 static bool depfile_fresh(const char *obj, const char *depfile, const char *src) {
@@ -773,17 +968,17 @@ static char *build_target(C_Build *b, C_Target *t, DepState states[], const Opti
     char *output = malloc(PATH_MAX); if (!output) die("out of memory");
     char outname[C_MAX_NAME + 4]; snprintf(outname, sizeof(outname), "%s%s", t->name, t->kind == C_TARGET_STATIC_LIBRARY ? ".a" : "");
     path_join(output, profile_dir, outname);
-    bool relink = !file_exists(output);
+    bool relink = !file_exists(output) || !ready_marker_matches(output, "artifact");
     time_t outt = mtime_of(output);
     for (size_t i = 0; i < objects.count; ++i) if (mtime_of(objects.items[i]) > outt) relink = true;
 
     if (relink || compiled) {
         if (t->kind == C_TARGET_STATIC_LIBRARY) {
             StrVec a = {0}; vec_push(&a, "ar"); vec_push(&a, "rcs"); vec_push(&a, output); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
-            note("AR", "%s", output); if (run_process(&a, opt->verbose, NULL) != 0) die("archive failed"); vec_free(&a);
+            note("AR", "%s", output); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("archive failed"); vec_free(&a);
         } else {
             StrVec a = {0}; vec_push(&a, opt->cc); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]); append_link_flags(&a, t, b, states); vec_push(&a, "-o"); vec_push(&a, output);
-            note("LINK", "%s", output); if (run_process(&a, opt->verbose, NULL) != 0) die("link failed"); vec_free(&a);
+            note("LINK", "%s", output); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("link failed"); vec_free(&a);
         }
     } else note("CACHED", "%s", t->name);
     vec_free(&sources); vec_free(&objects); return output;
