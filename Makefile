@@ -19,9 +19,9 @@ endif
 
 all: $(TARGET)
 
-$(NATIVE): src/cli.c src/main.c src/cache_io.h src/dependency_cache_guard.h src/perf_v2.h include/cbuild.h
+$(NATIVE): src/cli.c src/main.c src/cache_io.h src/dependency_cache_guard.h src/dependency_cache_clean_guard.h src/perf_v2.h include/cbuild.h
 	mkdir -p $(BUILD)
-	$(CC) $(CPPFLAGS) $(PORTABILITY_CPPFLAGS) $(CFLAGS) -include src/cache_io.h -include src/dependency_cache_guard.h -Iinclude -DCBUILD_HEADER_PATH='"$(abspath include/cbuild.h)"' src/cli.c $(LDLIBS) -o $(NATIVE)
+	$(CC) $(CPPFLAGS) $(PORTABILITY_CPPFLAGS) $(CFLAGS) -include src/cache_io.h -include src/dependency_cache_guard.h -include src/dependency_cache_clean_guard.h -Iinclude -DCBUILD_HEADER_PATH='"$(abspath include/cbuild.h)"' src/cli.c $(LDLIBS) -o $(NATIVE)
 
 $(TARGET): src/wrapper.c src/wrapper_compat.h $(NATIVE)
 	mkdir -p $(BUILD)
