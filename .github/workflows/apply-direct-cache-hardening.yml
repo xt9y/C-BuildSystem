@@ -1,0 +1,627 @@
+name: Apply direct cache hardening
+
+on:
+  push:
+    paths:
+      - '.github/workflows/apply-direct-cache-hardening.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Patch core cache and artifact publication
+        shell: bash
+        run: |
+          python3 <<'PY'
+          from pathlib import Path
+
+          def replace_once(text, old, new, label):
+              count = text.count(old)
+              if count != 1:
+                  raise SystemExit(f"{label}: expected exactly one match, found {count}")
+              return text.replace(old, new, 1)
+
+          main_path = Path('src/main.c')
+          s = main_path.read_text()
+
+          old_remove = '''static int remove_tree(const char *path) {
+              if (!file_exists(path)) return 0;
+              DIR *d = opendir(path);
+              if (!d) return unlink(path);
+              struct dirent *ent;
+              char child[PATH_MAX];
+              int rc = 0;
+              while ((ent = readdir(d))) {
+                  if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+                  path_join(child, path, ent->d_name);
+                  struct stat st;
+                  if (lstat(child, &st) != 0) { rc = -1; break; }
+                  if (S_ISDIR(st.st_mode)) rc = remove_tree(child);
+                  else rc = unlink(child);
+                  if (rc != 0) break;
+              }
+              closedir(d);
+              if (rc == 0) rc = rmdir(path);
+              return rc;
+          }
+          '''
+          new_remove = '''static int remove_tree(const char *path) {
+              struct stat root;
+              if (lstat(path, &root) != 0) return errno == ENOENT ? 0 : -1;
+              if (!S_ISDIR(root.st_mode) || S_ISLNK(root.st_mode)) return unlink(path);
+              DIR *d = opendir(path);
+              if (!d) return -1;
+              struct dirent *ent;
+              char child[PATH_MAX];
+              int rc = 0;
+              while ((ent = readdir(d))) {
+                  if (!strcmp(ent->d_name, ".") || !strcmp(ent->d_name, "..")) continue;
+                  path_join(child, path, ent->d_name);
+                  struct stat st;
+                  if (lstat(child, &st) != 0) { rc = -1; break; }
+                  if (S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) rc = remove_tree(child);
+                  else rc = unlink(child);
+                  if (rc != 0) break;
+              }
+              int saved = errno;
+              closedir(d);
+              errno = saved;
+              if (rc == 0) rc = rmdir(path);
+              return rc;
+          }
+
+          static bool path_exists_nofollow(const char *path) {
+              struct stat st;
+              return lstat(path, &st) == 0;
+          }
+
+          static bool is_real_dir(const char *path) {
+              struct stat st;
+              return lstat(path, &st) == 0 && S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode);
+          }
+
+          static void ready_marker_path(const char *entry, char out[PATH_MAX]) {
+              if (snprintf(out, PATH_MAX, "%s.c-ready", entry) >= PATH_MAX) die("cache marker path too long: %s", entry);
+          }
+
+          static bool text_file_equals(const char *path, const char *expected) {
+              FILE *f = fopen(path, "r");
+              if (!f) return false;
+              char line[C_MAX_PATH + 256];
+              bool ok = fgets(line, sizeof(line), f) != NULL;
+              if (ok) {
+                  size_t n = strlen(line);
+                  while (n && (line[n - 1] == '\\n' || line[n - 1] == '\\r')) line[--n] = '\\0';
+                  ok = !strcmp(line, expected);
+              }
+              if (ok) {
+                  int ch;
+                  while ((ch = fgetc(f)) != EOF) if (ch != '\\n' && ch != '\\r' && ch != ' ' && ch != '\\t') { ok = false; break; }
+              }
+              fclose(f);
+              return ok;
+          }
+
+          static void write_text_file_atomic(const char *path, const char *text) {
+              char temp[PATH_MAX];
+              if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(temp))
+                  die("atomic file path too long: %s", path);
+              FILE *f = fopen(temp, "w");
+              if (!f) die("cannot create temporary file %s: %s", temp, strerror(errno));
+              bool ok = fprintf(f, "%s\\n", text ? text : "") >= 0 && fflush(f) == 0;
+              if (ok && fsync(fileno(f)) != 0) ok = false;
+              if (fclose(f) != 0) ok = false;
+              if (!ok) { unlink(temp); die("cannot finish temporary file %s", temp); }
+              if (rename(temp, path) != 0) { int saved = errno; unlink(temp); errno = saved; die("cannot publish %s: %s", path, strerror(errno)); }
+          }
+
+          static bool ready_marker_matches(const char *entry, const char *value) {
+              char marker[PATH_MAX];
+              ready_marker_path(entry, marker);
+              return text_file_equals(marker, value);
+          }
+
+          static void write_ready_marker(const char *entry, const char *value) {
+              char marker[PATH_MAX];
+              ready_marker_path(entry, marker);
+              write_text_file_atomic(marker, value);
+          }
+
+          static void remove_ready_marker(const char *entry) {
+              char marker[PATH_MAX];
+              ready_marker_path(entry, marker);
+              if (unlink(marker) != 0 && errno != ENOENT) die("cannot remove cache marker %s: %s", marker, strerror(errno));
+          }
+
+          static void remove_cache_entry(const char *entry) {
+              remove_ready_marker(entry);
+              if (remove_tree(entry) != 0 && errno != ENOENT) die("cannot remove cache entry %s: %s", entry, strerror(errno));
+          }
+
+          static void make_private_temp_dir(const char *final_path, char temp[PATH_MAX]) {
+              if (snprintf(temp, PATH_MAX, "%s.tmp.%ld", final_path, (long)getpid()) >= PATH_MAX)
+                  die("temporary directory path too long: %s", final_path);
+              if (remove_tree(temp) != 0 && errno != ENOENT) die("cannot clear temporary directory %s: %s", temp, strerror(errno));
+              if (mkdir(temp, 0700) != 0) die("cannot create temporary directory %s: %s", temp, strerror(errno));
+          }
+          '''
+          s = replace_once(s, old_remove, new_remove, 'remove_tree hardening')
+
+          capture_end = '''static const char *home_dir(void) {'''
+          git_helpers = '''static bool git_mirror_valid(const char *mirror) {
+              if (!is_real_dir(mirror)) return false;
+              StrVec bare = {0};
+              vec_push(&bare, "git"); vec_push(&bare, "--git-dir"); vec_push(&bare, mirror);
+              vec_push(&bare, "rev-parse"); vec_push(&bare, "--is-bare-repository");
+              char *result = capture_process(&bare, NULL); vec_free(&bare);
+              bool ok = result && !strcmp(result, "true");
+              free(result);
+              if (!ok) return false;
+              StrVec fsck = {0};
+              vec_push(&fsck, "git"); vec_push(&fsck, "--git-dir"); vec_push(&fsck, mirror);
+              vec_push(&fsck, "fsck"); vec_push(&fsck, "--connectivity-only");
+              int rc = run_process(&fsck, false, NULL); vec_free(&fsck);
+              return rc == 0;
+          }
+
+          static bool git_mirror_has_commit(const char *mirror, const char *resolved) {
+              char expr[128];
+              if (snprintf(expr, sizeof(expr), "%s^{commit}", resolved) >= (int)sizeof(expr)) return false;
+              StrVec a = {0};
+              vec_push(&a, "git"); vec_push(&a, "--git-dir"); vec_push(&a, mirror);
+              vec_push(&a, "cat-file"); vec_push(&a, "-e"); vec_push(&a, expr);
+              int rc = run_process(&a, false, NULL); vec_free(&a);
+              return rc == 0;
+          }
+
+          static int git_fetch_mirror(const char *mirror, const Options *opt) {
+              StrVec fetch = {0};
+              vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror);
+              vec_push(&fetch, "fetch"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
+              int rc = run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
+              return rc;
+          }
+
+          static int run_process_atomic_output(StrVec *args, bool verbose, const char *output) {
+              char temp_dir[PATH_MAX];
+              if (snprintf(temp_dir, sizeof(temp_dir), "%s.tmp.XXXXXX", output) >= (int)sizeof(temp_dir)) return 1;
+              if (!mkdtemp(temp_dir)) return 1;
+              char temp_output[PATH_MAX]; path_join(temp_output, temp_dir, "artifact");
+              bool replaced = false;
+              for (size_t i = 0; i < args->count; ++i) {
+                  if (!strcmp(args->items[i], output)) {
+                      free(args->items[i]);
+                      args->items[i] = xstrdup(temp_output);
+                      replaced = true;
+                  }
+              }
+              if (!replaced) { remove_tree(temp_dir); errno = EINVAL; return 1; }
+              int rc = run_process(args, verbose, NULL);
+              if (rc == 0 && rename(temp_output, output) != 0) rc = 1;
+              int saved = errno;
+              (void)remove_tree(temp_dir);
+              errno = saved;
+              if (rc == 0) write_ready_marker(output, "artifact");
+              return rc;
+          }
+
+          '''
+          if capture_end not in s:
+              raise SystemExit('home_dir anchor missing')
+          s = s.replace(capture_end, git_helpers + capture_end, 1)
+
+          save_start = s.index('static void save_lock(const LockFile *lock) {')
+          save_end = s.index('static LockEntry *lock_for', save_start)
+          new_save = '''static void save_lock(const LockFile *lock) {
+              if (lock->count == 0) return;
+              char temp[PATH_MAX];
+              if (snprintf(temp, sizeof(temp), "c.lock.tmp.%ld", (long)getpid()) >= (int)sizeof(temp)) die("lockfile temp path too long");
+              FILE *f = fopen(temp, "w");
+              if (!f) die("cannot write temporary c.lock: %s", strerror(errno));
+              fprintf(f, "# Generated by c. Commit this file.\\n\\n");
+              for (size_t i = 0; i < lock->count; ++i) {
+                  const LockEntry *e = &lock->entries[i];
+                  fprintf(f, "[[dependency]]\\nname = \\\"%s\\\"\\nurl = \\\"%s\\\"\\nrequested = \\\"%s\\\"\\nresolved = \\\"%s\\\"\\n\\n",
+                          e->name, e->url, e->requested, e->resolved);
+              }
+              bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+              if (fclose(f) != 0) ok = false;
+              if (!ok) { unlink(temp); die("cannot finish c.lock"); }
+              if (rename(temp, "c.lock") != 0) { int saved = errno; unlink(temp); errno = saved; die("cannot publish c.lock: %s", strerror(errno)); }
+          }
+
+          '''
+          s = s[:save_start] + new_save + s[save_end:]
+
+          mirror_start = s.index('static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mirror[PATH_MAX]) {')
+          mirror_end = s.index('static void resolve_dependency', mirror_start)
+          new_mirror = '''static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mirror[PATH_MAX]) {
+              char cache[PATH_MAX], repos[PATH_MAX], h[17];
+              cache_root(cache); path_join(repos, cache, "git"); mkdir_p(repos); hash_hex(d->git, h);
+              char mirror_name[32]; snprintf(mirror_name, sizeof(mirror_name), "%s.git", h);
+              path_join(mirror, repos, mirror_name);
+
+              if (path_exists_nofollow(mirror)) {
+                  if (!is_real_dir(mirror)) {
+                      note("RECOVER", "%s mirror", d->name);
+                      remove_cache_entry(mirror);
+                  } else if (!ready_marker_matches(mirror, d->git)) {
+                      if (git_mirror_valid(mirror)) write_ready_marker(mirror, d->git);
+                      else {
+                          note("RECOVER", "%s mirror", d->name);
+                          remove_cache_entry(mirror);
+                      }
+                  }
+              }
+
+              if (!is_real_dir(mirror)) {
+                  char temp[PATH_MAX]; make_private_temp_dir(mirror, temp);
+                  note("FETCH", "%s", d->name);
+                  StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, d->git); vec_push(&a, temp);
+                  int rc = run_process(&a, opt->verbose, NULL); vec_free(&a);
+                  if (rc != 0 || !git_mirror_valid(temp)) {
+                      (void)remove_tree(temp);
+                      die("failed to clone %s", d->git);
+                  }
+                  if (rename(temp, mirror) != 0) {
+                      int saved = errno;
+                      (void)remove_tree(temp);
+                      if (!is_real_dir(mirror) || !ready_marker_matches(mirror, d->git)) {
+                          errno = saved;
+                          die("cannot publish git mirror for %s: %s", d->name, strerror(errno));
+                      }
+                  } else {
+                      write_ready_marker(mirror, d->git);
+                  }
+              }
+          }
+
+          '''
+          s = s[:mirror_start] + new_mirror + s[mirror_end:]
+
+          old_fetch = '''        StrVec fetch = {0}; vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror); vec_push(&fetch, "fetch"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
+                  (void)run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
+          '''
+          new_fetch = '''        if (git_fetch_mirror(mirror, opt) != 0) die("failed to fetch %s", d->git);
+          '''
+          s = replace_once(s, old_fetch, new_fetch, 'dependency fetch result handling')
+
+          resolved_anchor = '''    snprintf(state->resolved, sizeof(state->resolved), "%s", e->resolved);
+
+          '''
+          resolved_insert = '''    snprintf(state->resolved, sizeof(state->resolved), "%s", e->resolved);
+              if (!git_mirror_has_commit(mirror, e->resolved)) {
+                  note("RECOVER", "%s mirror objects", d->name);
+                  if (git_fetch_mirror(mirror, opt) != 0 || !git_mirror_has_commit(mirror, e->resolved))
+                      die("cached mirror for %s does not contain locked commit %s", d->name, e->resolved);
+              }
+
+          '''
+          s = replace_once(s, resolved_anchor, resolved_insert, 'locked commit verification')
+
+          old_checkout = '''    if (!is_dir(state->source)) {
+                  mkdir_p(state->source);
+                  StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, state->source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--"); vec_push(&co, ".");
+                  if (run_process(&co, opt->verbose, NULL) != 0) die("failed to checkout %s", d->name);
+                  vec_free(&co);
+              }
+          '''
+          new_checkout = '''    if (path_exists_nofollow(state->source) && (!is_real_dir(state->source) || !ready_marker_matches(state->source, e->resolved))) {
+                  note("RECOVER", "%s checkout", d->name);
+                  remove_cache_entry(state->source);
+              }
+              if (!is_real_dir(state->source)) {
+                  char temp_source[PATH_MAX]; make_private_temp_dir(state->source, temp_source);
+                  StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, temp_source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--"); vec_push(&co, ".");
+                  int rc = run_process(&co, opt->verbose, NULL); vec_free(&co);
+                  if (rc != 0) {
+                      (void)remove_tree(temp_source);
+                      if (!git_mirror_valid(mirror)) remove_ready_marker(mirror);
+                      die("failed to checkout %s", d->name);
+                  }
+                  if (rename(temp_source, state->source) != 0) {
+                      int saved = errno;
+                      (void)remove_tree(temp_source);
+                      if (!is_real_dir(state->source) || !ready_marker_matches(state->source, e->resolved)) {
+                          errno = saved;
+                          die("cannot publish checkout for %s: %s", d->name, strerror(errno));
+                      }
+                  } else {
+                      write_ready_marker(state->source, e->resolved);
+                  }
+              }
+          '''
+          s = replace_once(s, old_checkout, new_checkout, 'transactional source checkout')
+
+          cmake_start = s.index('    if (build_artifacts && d->kind == C_DEP_CMAKE) {')
+          cmake_end = s.index('\n}\n\nstatic bool depfile_fresh', cmake_start)
+          new_cmake = '''    if (build_artifacts && d->kind == C_DEP_CMAKE) {
+                  char stamp[PATH_MAX]; path_join(stamp, state->package, ".c-built");
+                  bool package_ready = is_real_dir(state->package) && text_file_equals(stamp, e->resolved);
+                  if (!package_ready) {
+                      char buildroot[PATH_MAX], bdir[PATH_MAX], src[PATH_MAX];
+                      path_join(buildroot, cache, "dep-build"); mkdir_p(buildroot);
+                      char build_name[C_MAX_NAME + 32]; snprintf(build_name, sizeof(build_name), "%s-%s", d->name, pkg_key);
+                      path_join(bdir, buildroot, build_name);
+                      snprintf(src, PATH_MAX, "%s%s%s", state->source, d->subdir[0] ? "/" : "", d->subdir);
+                      if (path_exists_nofollow(bdir) && remove_tree(bdir) != 0) die("cannot clear dependency build directory: %s", bdir);
+                      if (path_exists_nofollow(state->package)) remove_cache_entry(state->package);
+                      mkdir_p(bdir); mkdir_p(state->package);
+                      note("DEP", "%s", d->name);
+                      StrVec cm = {0}; vec_push(&cm, "cmake"); vec_push(&cm, "-S"); vec_push(&cm, src); vec_push(&cm, "-B"); vec_push(&cm, bdir);
+                      char type[64]; snprintf(type, sizeof(type), "-DCMAKE_BUILD_TYPE=%s", opt->release ? "Release" : "Debug"); vec_push(&cm, type);
+                      char compiler[C_MAX_PATH + 64]; snprintf(compiler, sizeof(compiler), "-DCMAKE_C_COMPILER=%s", opt->cc); vec_push(&cm, compiler);
+                      char prefix[PATH_MAX + 64]; snprintf(prefix, sizeof(prefix), "-DCMAKE_INSTALL_PREFIX=%s", state->package); vec_push(&cm, prefix);
+                      vec_push(&cm, "-DBUILD_SHARED_LIBS=OFF");
+                      for (size_t j = 0; j < d->cmake_options.count; ++j) vec_push(&cm, d->cmake_options.items[j]);
+                      if (run_process(&cm, opt->verbose, NULL) != 0) { vec_free(&cm); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake configure failed for %s", d->name); }
+                      vec_free(&cm);
+                      StrVec build = {0}; vec_push(&build, "cmake"); vec_push(&build, "--build"); vec_push(&build, bdir); vec_push(&build, "--config"); vec_push(&build, opt->release ? "Release" : "Debug");
+                      if (run_process(&build, opt->verbose, NULL) != 0) { vec_free(&build); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake build failed for %s", d->name); }
+                      vec_free(&build);
+                      StrVec install = {0}; vec_push(&install, "cmake"); vec_push(&install, "--install"); vec_push(&install, bdir); vec_push(&install, "--config"); vec_push(&install, opt->release ? "Release" : "Debug");
+                      if (run_process(&install, opt->verbose, NULL) != 0) { vec_free(&install); (void)remove_tree(bdir); remove_cache_entry(state->package); die("cmake install failed for %s", d->name); }
+                      vec_free(&install);
+                      write_text_file_atomic(stamp, e->resolved);
+                  }
+              }
+          '''
+          s = s[:cmake_start] + new_cmake + s[cmake_end:]
+
+          s = replace_once(s, '    bool relink = !file_exists(output);\n', '    bool relink = !file_exists(output) || !ready_marker_matches(output, "artifact");\n', 'legacy target readiness')
+          s = replace_once(s, 'note("AR", "%s", output); if (run_process(&a, opt->verbose, NULL) != 0) die("archive failed"); vec_free(&a);', 'note("AR", "%s", output); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("archive failed"); vec_free(&a);', 'legacy archive publication')
+          s = replace_once(s, 'note("LINK", "%s", output); if (run_process(&a, opt->verbose, NULL) != 0) die("link failed"); vec_free(&a);', 'note("LINK", "%s", output); if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("link failed"); vec_free(&a);', 'legacy link publication')
+
+          main_path.write_text(s)
+
+          cli_path = Path('src/cli.c')
+          c = cli_path.read_text()
+
+          task_struct = '''typedef struct CompilerTask {
+              StrVec cmd;
+              char *source;
+              char *obj;
+              char *depf;
+              char key[17];
+              pid_t pid;
+              bool active;
+              double estimate_ms;
+              double started_ms;
+          } CompilerTask;
+          '''
+          task_struct_new = task_struct + '''
+          static bool compiler_object_ready(const char *obj) {
+              return ready_marker_matches(obj, "object");
+          }
+
+          static void compiler_object_invalidate(const char *obj, const char *depf) {
+              if (obj) remove_ready_marker(obj);
+              if (obj && unlink(obj) != 0 && errno != ENOENT) die("cannot invalidate object %s: %s", obj, strerror(errno));
+              if (depf && unlink(depf) != 0 && errno != ENOENT) die("cannot invalidate depfile %s: %s", depf, strerror(errno));
+          }
+          '''
+          c = replace_once(c, task_struct, task_struct_new, 'object readiness helpers')
+
+          c = replace_once(c, '    if (compiler_depfile_fresh(obj, depf, source)) {\n', '    if (compiler_object_ready(obj) && compiler_depfile_fresh(obj, depf, source)) {\n', 'object freshness marker')
+          old_cache_restore = '''    if (compiler_object_cache_restore(key, obj, depf)) {
+                  if (compiler_perf.explain) note("WHY", "%s restored from object cache", source);
+                  compiler_profile_cached(source);
+                  vec_free(cmd);
+                  return COMPILER_PREP_CACHE;
+              }
+          '''
+          new_cache_restore = '''    if (compiler_object_cache_restore(key, obj, depf)) {
+                  write_ready_marker(obj, "object");
+                  if (compiler_perf.explain) note("WHY", "%s restored from object cache", source);
+                  compiler_profile_cached(source);
+                  vec_free(cmd);
+                  return COMPILER_PREP_CACHE;
+              }
+          '''
+          c = replace_once(c, old_cache_restore, new_cache_restore, 'object cache readiness')
+          c = replace_once(c, '    if (compiler_perf.explain) note("WHY", "%s rebuild required (source/dependency/command changed or object missing)", source);\n    task->cmd = *cmd;\n', '    if (compiler_perf.explain) note("WHY", "%s rebuild required (source/dependency/command changed or object missing)", source);\n    compiler_object_invalidate(obj, depf);\n    task->cmd = *cmd;\n', 'object invalidation before compile')
+
+          old_cancel = '''static void compiler_cancel_tasks(CompilerTask *tasks, size_t count) {
+              for (size_t i = 0; i < count; ++i) if (tasks[i].active) kill(tasks[i].pid, SIGTERM);
+              for (size_t i = 0; i < count; ++i) if (tasks[i].active) { compiler_wait(tasks[i].pid); tasks[i].active = false; }
+          }
+          '''
+          new_cancel = '''static void compiler_cancel_tasks(CompilerTask *tasks, size_t count) {
+              for (size_t i = 0; i < count; ++i) if (tasks[i].active) kill(tasks[i].pid, SIGTERM);
+              for (size_t i = 0; i < count; ++i) if (tasks[i].active) { compiler_wait(tasks[i].pid); tasks[i].active = false; }
+              for (size_t i = 0; i < count; ++i) if (tasks[i].obj) compiler_object_invalidate(tasks[i].obj, tasks[i].depf);
+          }
+          '''
+          c = replace_once(c, old_cancel, new_cancel, 'parallel compile cleanup')
+
+          c = replace_once(c, '''        compiler_history_record(task->source, compiler_perf_now_ms() - task->started_ms);
+                  compiler_object_cache_store(task->key, task->obj, task->depf);
+              }
+              return count;
+          }
+          ''', '''        compiler_history_record(task->source, compiler_perf_now_ms() - task->started_ms);
+                  compiler_object_cache_store(task->key, task->obj, task->depf);
+              }
+              for (size_t i = 0; i < count; ++i) write_ready_marker(tasks[i].obj, "object");
+              return count;
+          }
+          ''', 'publish object readiness after batch')
+
+          unity_start = c.index('static void compiler_write_unity_file(')
+          unity_end = c.index('static void compiler_make_unity_sources', unity_start)
+          unity_new = '''static void compiler_write_unity_file(const char *path, StrVec *sources, size_t *indices, size_t count, const char *root_prefix) {
+              if (file_exists(path)) return;
+              char temp[PATH_MAX];
+              if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", path, (long)getpid()) >= (int)sizeof(temp)) die("unity source path too long");
+              FILE *f = fopen(temp, "w");
+              if (!f) die("cannot write unity source %s", temp);
+              fputs("/* generated by c --unity */\\n", f);
+              for (size_t i = 0; i < count; ++i) {
+                  const char *src = sources->items[indices[i]];
+                  fputs("#include \\\"", f);
+                  if (src[0] != '/' && root_prefix) fputs(root_prefix, f);
+                  for (const char *p = src; *p; ++p) {
+                      if (*p == '\\\\' || *p == '\"') fputc('\\\\', f);
+                      fputc(*p, f);
+                  }
+                  fputs("\\\"\\n", f);
+              }
+              bool ok = fflush(f) == 0 && fsync(fileno(f)) == 0;
+              if (fclose(f) != 0) ok = false;
+              if (!ok) { unlink(temp); die("cannot finish unity source %s", path); }
+              if (rename(temp, path) != 0) { int saved = errno; unlink(temp); errno = saved; die("cannot publish unity source %s: %s", path, strerror(errno)); }
+          }
+
+          '''
+          c = c[:unity_start] + unity_new + c[unity_end:]
+
+          c = replace_once(c, '    if (file_exists(library)) {\n', '    if (file_exists(library) && ready_marker_matches(library, "artifact")) {\n', 'dependency archive readiness')
+          c = replace_once(c, 'if (compiler_run_process(&ar, opt->verbose) != 0) die("dependency archive failed: %s", d->name);', 'if (run_process_atomic_output(&ar, opt->verbose, library) != 0) die("dependency archive failed: %s", d->name);', 'dependency archive atomic publication')
+          c = replace_once(c, '    bool relink = !file_exists(output); time_t outt = mtime_of(output);\n', '    bool relink = !file_exists(output) || !ready_marker_matches(output, "artifact"); time_t outt = mtime_of(output);\n', 'target output readiness')
+          c = replace_once(c, 'if (compiler_run_process(&a, opt->verbose) != 0) die("archive failed"); link_ms', 'if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("archive failed"); link_ms', 'target archive atomic publication')
+          c = replace_once(c, 'if (compiler_run_process(&a, opt->verbose) != 0) die("link failed"); link_ms', 'if (run_process_atomic_output(&a, opt->verbose, output) != 0) die("link failed"); link_ms', 'target link atomic publication')
+
+          cli_path.write_text(c)
+
+          make = Path('Makefile').read_text()
+          make = make.replace('src/cache_io.h src/dependency_cache_guard.h src/dependency_cache_clean_guard.h src/perf_v2.h', 'src/cache_io.h src/perf_v2.h')
+          make = make.replace('-include src/cache_io.h -include src/dependency_cache_guard.h -include src/dependency_cache_clean_guard.h', '-include src/cache_io.h')
+          Path('Makefile').write_text(make)
+
+          run_tests = Path('.github/ci/run-tests.sh').read_text()
+          needle = 'sh "$RUNTIME_TESTS/interrupted_compile.sh" "$C_BIN" "$INC"\n'
+          if 'cache_artifact_recovery.sh' not in run_tests:
+              run_tests = replace_once(run_tests, needle, needle + 'sh "$RUNTIME_TESTS/cache_artifact_recovery.sh" "$C_BIN" "$INC"\n', 'test runner insertion')
+          Path('.github/ci/run-tests.sh').write_text(run_tests)
+
+          test = r'''#!/bin/sh
+          set -eu
+
+          C_BIN="$1"
+          INC="$2"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT INT TERM HUP
+
+          export C_INCLUDE_DIR="$INC"
+          export C_CACHE_DIR="$TMP/cache"
+
+          # Root cache paths must never be followed when cleaning. A symlinked
+          # cache root used to let remove_tree() recurse into the target.
+          mkdir -p "$TMP/victim"
+          printf 'keep\n' >"$TMP/victim/keep.txt"
+          ln -s "$TMP/victim" "$TMP/cache-link"
+          C_CACHE_DIR="$TMP/cache-link" "$C_BIN" cache clean >/dev/null
+          test -f "$TMP/victim/keep.txt"
+          test ! -e "$TMP/cache-link"
+
+          mkdir -p "$TMP/project/src" "$TMP/bin"
+          cat >"$TMP/project/src/main.c" <<'SRC'
+          #include <stdio.h>
+          int main(void) { puts("v1"); return 0; }
+          SRC
+          cat >"$TMP/project/build.c" <<'SRC'
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/main.c");
+          }
+          SRC
+
+          REAL_CC="$(command -v cc)"
+          cat >"$TMP/bin/cc-wrapper" <<SH
+          #!/bin/sh
+          set -eu
+          real='$REAL_CC'
+          out=''
+          dep=''
+          compile=0
+          prev=''
+          for arg in "\$@"; do
+              if [ "\$prev" = -o ]; then out="\$arg"; fi
+              if [ "\$prev" = -MF ]; then dep="\$arg"; fi
+              [ "\$arg" = -c ] && compile=1
+              prev="\$arg"
+          done
+          if [ "\${C_FAIL_COMPILE:-0}" = 1 ] && [ "\$compile" = 1 ]; then
+              [ -n "\$out" ] && printf 'partial-object\n' >"\$out"
+              [ -n "\$dep" ] && printf '%s: src/main.c\n' "\$out" >"\$dep"
+              exit 1
+          fi
+          if [ "\${C_FAIL_LINK:-0}" = 1 ] && [ "\$compile" = 0 ] && [ -n "\$out" ]; then
+              printf 'partial-link\n' >"\$out"
+              exit 1
+          fi
+          exec "\$real" "\$@"
+          SH
+          chmod +x "$TMP/bin/cc-wrapper"
+
+          (
+              cd "$TMP/project"
+              export CC="$TMP/bin/cc-wrapper"
+              "$C_BIN" build >/dev/null
+              test "$(./build/debug/app)" = v1
+
+              cat >src/main.c <<'SRC'
+          #include <stdio.h>
+          int main(void) { puts("v2"); return 0; }
+          SRC
+
+              export C_FAIL_COMPILE=1
+              if "$C_BIN" build >/dev/null 2>&1; then
+                  echo "cache-artifact-recovery: poisoned compile unexpectedly succeeded" >&2
+                  exit 1
+              fi
+              export C_FAIL_COMPILE=0
+              "$C_BIN" build >/dev/null
+              test "$(./build/debug/app)" = v2
+
+              cat >src/main.c <<'SRC'
+          #include <stdio.h>
+          int main(void) { puts("v3"); return 0; }
+          SRC
+              export C_FAIL_LINK=1
+              if "$C_BIN" build >/dev/null 2>&1; then
+                  echo "cache-artifact-recovery: poisoned link unexpectedly succeeded" >&2
+                  exit 1
+              fi
+              # The previous published executable must remain intact.
+              test "$(./build/debug/app)" = v2
+              export C_FAIL_LINK=0
+              "$C_BIN" build >/dev/null
+              test "$(./build/debug/app)" = v3
+          )
+
+          echo "cache-artifact-recovery: ok"
+          '''
+          # Strip the workflow YAML indentation embedded in the raw string.
+          lines = test.splitlines()
+          cleaned = '\n'.join(line[10:] if line.startswith('          ') else line for line in lines).lstrip() + '\n'
+          Path('.github/ci/tests/cache_artifact_recovery.sh').write_text(cleaned)
+          PY
+
+          rm -f src/dependency_cache_guard.h src/dependency_cache_clean_guard.h
+
+      - name: Build and run regression suite
+        shell: bash
+        run: |
+          make clean
+          make -j2
+          make test
+
+      - name: Commit hardened core directly to main
+        shell: bash
+        run: |
+          rm -f .github/workflows/apply-direct-cache-hardening.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "Harden cache artifact publication at the source"
+          git push origin HEAD:main
