@@ -378,6 +378,35 @@ static void compiler_append_linker(StrVec *a) {
     vec_push(a, flag);
 }
 
+#ifdef __APPLE__
+/*
+ * Atomic publication links into a temporary path and renames the finished
+ * artifact. Darwin records that temporary path as a dylib's install name
+ * unless an explicit stable name is supplied, leaving consumers pointing at
+ * a directory that is deleted immediately after publication.
+ */
+static int compiler_run_process_atomic_output(StrVec *args, bool verbose, const char *output) {
+    bool dynamic_library = false;
+    for (size_t i = 0; i < args->count; ++i) {
+        if (!strcmp(args->items[i], "-dynamiclib")) {
+            dynamic_library = true;
+            break;
+        }
+    }
+    if (dynamic_library) {
+        char install_name[PATH_MAX + 32];
+        int n = snprintf(install_name, sizeof(install_name), "-Wl,-install_name,%s", output);
+        if (n < 0 || n >= (int)sizeof(install_name)) {
+            errno = ENAMETOOLONG;
+            return 1;
+        }
+        vec_push(args, install_name);
+    }
+    return run_process_atomic_output(args, verbose, output);
+}
+#define run_process_atomic_output compiler_run_process_atomic_output
+#endif
+
 static bool compiler_watch_skip_name(const char *name) {
     return !strcmp(name, ".") || !strcmp(name, "..") || !strcmp(name, ".git") ||
            !strcmp(name, "build") || !strcmp(name, ".rendercheck") ||
