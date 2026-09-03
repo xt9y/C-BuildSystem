@@ -1,0 +1,8 @@
+C-BuildSystem
+
+C build system written in C.
+
+install --> make && sudo make install
+build   --> c build
+run     --> c run
+test    --> c test
