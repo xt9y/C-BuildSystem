@@ -125,10 +125,20 @@ SRC
     "$C_BIN" build >two.log 2>&1 & p2=$!
     "$C_BIN" build >three.log 2>&1 & p3=$!
     "$C_BIN" build >four.log 2>&1 & p4=$!
-    wait "$p1"
-    wait "$p2"
-    wait "$p3"
-    wait "$p4"
+
+    failed=0
+    wait "$p1" || failed=1
+    wait "$p2" || failed=1
+    wait "$p3" || failed=1
+    wait "$p4" || failed=1
+    if [ "$failed" -ne 0 ]; then
+        echo "incremental-correctness: concurrent build failed" >&2
+        for log in one.log two.log three.log four.log; do
+            echo "--- $log ---" >&2
+            cat "$log" >&2
+        done
+        exit 1
+    fi
     test -x build/debug/app
     ./build/debug/app
 )
