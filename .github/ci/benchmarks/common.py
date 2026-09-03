@@ -5,6 +5,19 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 C_BIN = ROOT / 'build' / 'c'
 
+BENCHMARK_SCHEMA_VERSION = 1
+STANDARD_CLEAN_RUNS = 3
+STANDARD_NOOP_RUNS = 10
+STANDARD_INCREMENTAL_RUNS = 5
+STANDARD_CONFIG_RUNS = 3
+STATISTICS_POLICY = {
+    'primary': 'median',
+    'wall_time_unit': 'ms',
+    'spread': ['min', 'median', 'max', 'population_stdev', 'coefficient_of_variation_percent'],
+    'resource_aggregation': 'median',
+    'object_cache': 'disabled',
+}
+
 TIME_FIELDS = {
     'User time (seconds)': ('user_s', float),
     'System time (seconds)': ('system_s', float),
@@ -49,6 +62,8 @@ def profiled(cmd, *, cwd=None, env=None):
         path.unlink(missing_ok=True)
 
 def summarize(samples):
+    if not samples:
+        raise ValueError('benchmark summary requires at least one sample')
     out = {k: statistics.median(s[k] for s in samples) for k in samples[0]}
     walls = [s['wall_ms'] for s in samples]
     mean = statistics.mean(walls)
@@ -59,6 +74,42 @@ def summarize(samples):
     }
     out['samples'] = samples
     return out
+
+def as_summary(value):
+    if isinstance(value, dict) and 'samples' in value and 'stability' in value:
+        return value
+    if isinstance(value, dict) and 'wall_ms' in value:
+        return summarize([value])
+    raise TypeError('benchmark scenario must be a profiled sample or summary')
+
+def standard_contract(*, clean_c, clean_ninja, noop_c, noop_ninja,
+                      incremental_c, incremental_ninja, incremental_description,
+                      rebuilt_tus=None, runs=None):
+    scenarios = {
+        'clean': {
+            'description': 'build from an empty output directory',
+            'c': as_summary(clean_c),
+            'cmake_ninja': as_summary(clean_ninja),
+        },
+        'noop': {
+            'description': 'build with no source changes',
+            'c': as_summary(noop_c),
+            'cmake_ninja': as_summary(noop_ninja),
+        },
+        'incremental': {
+            'description': incremental_description,
+            'c': as_summary(incremental_c),
+            'cmake_ninja': as_summary(incremental_ninja),
+        },
+    }
+    if rebuilt_tus is not None:
+        scenarios['incremental']['rebuilt_tus'] = rebuilt_tus
+    return {
+        'schema_version': BENCHMARK_SCHEMA_VERSION,
+        'statistics': dict(STATISTICS_POLICY),
+        'run_counts': dict(runs or {}),
+        'scenarios': scenarios,
+    }
 
 def machine_stats():
     cpu = 'unknown'

@@ -5,9 +5,14 @@
  * cbuild.h - public build.c API for the `c` build system.
  *
  * build.c is compiled as C and loaded by the c executable. Keep this header
- * dependency-free and source-compatible enough for build scripts to stay
- * simple. The project currently guarantees source compatibility, not a frozen
- * binary ABI for the public structs below.
+ * dependency-free. Beginning with 1.0, the documented names, signatures,
+ * enum constants and build-description semantics form the source API for the
+ * 1.x line. Compatible additions are allowed in 1.x; removals or incompatible
+ * signature/semantic changes require a new major version.
+ *
+ * The public structs remain implementation-visible so build.c stays simple,
+ * but their layout is not a binary ABI and direct field access is not part of
+ * the supported source-compatibility contract.
  */
 
 #include <stddef.h>
@@ -18,6 +23,10 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+#define C_BUILD_API_VERSION_MAJOR 1
+#define C_BUILD_API_VERSION_MINOR 0
+#define C_BUILD_API_VERSION_PATCH 0
 
 #define C_MAX_TARGETS 256
 #define C_MAX_DEPS 256

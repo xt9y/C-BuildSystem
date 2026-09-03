@@ -20,31 +20,105 @@ env:
 
 jobs:
   linux:
-    name: Linux
-    runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    name: Linux (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04 x86_64 / GCC
+            runner: ubuntu-22.04
+            cc: gcc
+            cxx: g++
+          - name: Ubuntu 24.04 x86_64 / GCC
+            runner: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - name: Ubuntu 24.04 x86_64 / Clang
+            runner: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+          - name: Ubuntu 24.04 arm64 / GCC
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            cxx: g++
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+      - name: Toolchain
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          uname -a
+          "$CC" --version | head -1
+          "$CXX" --version | head -1
       - name: Build
-        run: make
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: make clean all
       - name: Test
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
         run: make test
 
   macos:
-    name: macOS
+    name: macOS (${{ matrix.name }})
     needs: linux
-    runs-on: macos-latest
-    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 15 arm64
+            runner: macos-15
+          - name: 15 Intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -a
+          cc --version | head -1
+          c++ --version | head -1
       - name: Build
-        run: make
+        run: make clean all
       - name: Test
         run: make test
 
+  distro-smoke:
+    name: Distro (${{ matrix.name }})
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 13 x86_64
+            image: debian:13-slim
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3
+          - name: Alpine 3.22 x86_64 / musl
+            image: alpine:3.22
+            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test in distro
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ matrix.setup }}
+        run: |
+          docker run --rm \
+            -e SETUP="$SETUP" \
+            -v "$PWD:/src" -w /src \
+            "$IMAGE" sh -lc '$SETUP && make clean all && make test'
+
   sanitizers:
     name: ASan + UBSan
-    needs: macos
+    needs: distro-smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
@@ -58,6 +132,8 @@ jobs:
         run: make clean all
       - name: Test with sanitizers
         env:
+          CC: clang
+          CXX: clang++
           ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
           UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
         run: make test
@@ -127,6 +203,24 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  real-projects:
+    name: Real projects
+    needs: fuzz-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install BGE system dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+            libxinerama-dev libxcursor-dev libxext-dev
+      - name: Build C-BuildSystem
+        run: make clean all
+      - name: Validate pinned real projects
+        run: .github/ci/real-projects.sh "$PWD/build/c" "$PWD/include"
+
   fuzz-nightly:
     name: Nightly fuzz (${{ matrix.target }})
     needs: fuzz-smoke
@@ -160,7 +254,7 @@ jobs:
 
   benchmark-cjson:
     name: cJSON benchmark
-    needs: fuzz-smoke
+    needs: real-projects
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 45
@@ -316,18 +410,55 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  release-1-0:
+    name: Release 1.0.0
+    needs: [linux, macos, distro-smoke, sanitizers, fuzz-smoke, real-projects]
+    if: >-
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.linux.result == 'success' && needs.macos.result == 'success' &&
+      needs.distro-smoke.result == 'success' && needs.sanitizers.result == 'success' &&
+      needs.fuzz-smoke.result == 'success' && needs.real-projects.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: Tag and publish first stable release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: v1.0.0
+        run: |
+          set -euo pipefail
+          if gh release view "$TAG" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "$TAG is already published; leaving the stable release unchanged."
+            exit 0
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "c: $TAG exists without a published release; refusing to retarget it" >&2
+            exit 1
+          fi
+          gh release create "$TAG" -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" \
+            --title "C-BuildSystem 1.0.0" \
+            --notes-file docs/CHANGELOG.md
+
   summary:
     name: Summary
     needs:
       - linux
       - macos
+      - distro-smoke
       - sanitizers
       - fuzz-smoke
+      - real-projects
       - fuzz-nightly
       - benchmark-cjson
       - benchmark-fanout
       - benchmark-sdl3
       - benchmark-large
+      - release-1-0
     if: always()
     runs-on: ubuntu-24.04
     permissions:
@@ -375,13 +506,16 @@ jobs:
         env:
           LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos.result }}
+          DISTRO_RESULT: ${{ needs.distro-smoke.result }}
           SANITIZER_RESULT: ${{ needs.sanitizers.result }}
           FUZZ_RESULT: ${{ needs.fuzz-smoke.result }}
+          REAL_PROJECTS_RESULT: ${{ needs.real-projects.result }}
           NIGHTLY_RESULT: ${{ needs.fuzz-nightly.result }}
           CJSON_RESULT: ${{ needs.benchmark-cjson.result }}
           FANOUT_RESULT: ${{ needs.benchmark-fanout.result }}
           SDL3_RESULT: ${{ needs.benchmark-sdl3.result }}
           LARGE_RESULT: ${{ needs.benchmark-large.result }}
+          RELEASE_RESULT: ${{ needs.release-1-0.result }}
           ASSET_BASE: ${{ steps.media.outputs.asset_base }}
           STAMP: ${{ steps.media.outputs.stamp }}
         run: |
@@ -391,10 +525,15 @@ jobs:
             echo
             echo '## Correctness pipeline'
             echo
-            echo "- Linux: **$LINUX_RESULT**"
-            echo "- macOS: **$MACOS_RESULT**"
+            echo "- Linux matrix: **$LINUX_RESULT**"
+            echo "- macOS matrix: **$MACOS_RESULT**"
+            echo "- Debian/Alpine matrix: **$DISTRO_RESULT**"
             echo "- ASan + UBSan: **$SANITIZER_RESULT**"
             echo "- Fuzz smoke: **$FUZZ_RESULT**"
+            echo "- Real projects (BGE + cJSON + inih): **$REAL_PROJECTS_RESULT**"
+            if [ "$RELEASE_RESULT" != "skipped" ]; then
+              echo "- Stable release gate: **$RELEASE_RESULT**"
+            fi
             if [ "$NIGHTLY_RESULT" != "skipped" ]; then
               echo "- Nightly fuzz: **$NIGHTLY_RESULT**"
             fi

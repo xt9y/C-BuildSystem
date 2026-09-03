@@ -5,20 +5,23 @@ import os
 import shutil
 import statistics
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import common
 import benchmark_impl as impl
 
 BASE = "b07d48821698af08545cb38e293ead99753bfc35"
 CHANGE = "eba3c7ae0ad85c13051179d196e5187ccb96cf6a"
 CHANGE_FILE = "src/joystick/SDL_gamepad.c"
-CLEAN_RUNS = 3
-NOOP_RUNS = 10
-CHANGE_RUNS = 5
+CLEAN_RUNS = common.STANDARD_CLEAN_RUNS
+NOOP_RUNS = common.STANDARD_NOOP_RUNS
+CHANGE_RUNS = common.STANDARD_INCREMENTAL_RUNS
 ARCHIVE_RUNS = 5
-CONFIG_RUNS = 3
+CONFIG_RUNS = common.STANDARD_CONFIG_RUNS
 
 ROOT = Path(__file__).resolve().parents[2]
 C_BIN = ROOT / "build" / "c"
@@ -39,67 +42,13 @@ def cmake_args(source, build):
 
 impl.cmake_args = cmake_args
 
-TIME_FIELDS = {
-    "User time (seconds)": ("user_s", float),
-    "System time (seconds)": ("system_s", float),
-    "Maximum resident set size (kbytes)": ("max_rss_kb", int),
-    "Major (requiring I/O) page faults": ("major_faults", int),
-    "Minor (reclaiming a frame) page faults": ("minor_faults", int),
-    "Voluntary context switches": ("voluntary_context_switches", int),
-    "Involuntary context switches": ("involuntary_context_switches", int),
-    "File system inputs": ("fs_inputs", int),
-    "File system outputs": ("fs_outputs", int),
-}
-
-
-def parse_time(path):
-    values = {}
-    for raw in path.read_text().splitlines():
-        line = raw.strip()
-        for label, (name, cast) in TIME_FIELDS.items():
-            prefix = label + ":"
-            if line.startswith(prefix):
-                values[name] = cast(line[len(prefix):].strip())
-                break
-    missing = [name for name, _ in TIME_FIELDS.values() if name not in values]
-    if missing:
-        raise RuntimeError("missing GNU time fields: " + ", ".join(missing))
-    return values
-
 
 def profiled(cmd, *, cwd=None, env=None):
-    fd, filename = tempfile.mkstemp(prefix="c-sdl3-time-")
-    os.close(fd)
-    path = Path(filename)
-    try:
-        started = time.perf_counter_ns()
-        impl.run(["/usr/bin/time", "-v", "-o", str(path), *cmd], cwd=cwd, env=env, quiet=True)
-        wall_ms = (time.perf_counter_ns() - started) / 1_000_000.0
-        values = parse_time(path)
-        values["wall_ms"] = wall_ms
-        cpu_s = values["user_s"] + values["system_s"]
-        values["cpu_percent"] = cpu_s / (wall_ms / 1000.0) * 100.0 if wall_ms else 0.0
-        return values
-    finally:
-        path.unlink(missing_ok=True)
+    return common.profiled(cmd, cwd=cwd, env=env)
 
 
 def summarize(samples):
-    out = {}
-    for key in samples[0]:
-        out[key] = statistics.median(sample[key] for sample in samples)
-    walls = [sample["wall_ms"] for sample in samples]
-    mean = statistics.mean(walls)
-    stdev = statistics.pstdev(walls)
-    out["stability"] = {
-        "min_ms": min(walls),
-        "median_ms": statistics.median(walls),
-        "max_ms": max(walls),
-        "stdev_ms": stdev,
-        "cv_percent": stdev / mean * 100.0 if mean else 0.0,
-    }
-    out["samples"] = samples
-    return out
+    return common.summarize(samples)
 
 
 def checkout_with_gap(repo, revision):
@@ -161,23 +110,7 @@ def change_stats(repo):
 
 
 def machine_stats():
-    cpu_model = "unknown"
-    try:
-        for line in Path("/proc/cpuinfo").read_text().splitlines():
-            if line.startswith("model name"):
-                cpu_model = line.split(":", 1)[1].strip()
-                break
-    except OSError:
-        pass
-    return {
-        "date": time.strftime("%Y-%m-%d", time.gmtime()),
-        "platform": subprocess.check_output(["uname", "-a"], text=True).strip(),
-        "cpu_model": cpu_model,
-        "cpu_count": os.cpu_count(),
-        "compiler": subprocess.check_output(["cc", "--version"], text=True).splitlines()[0],
-        "cmake": subprocess.check_output(["cmake", "--version"], text=True).splitlines()[0],
-        "ninja": subprocess.check_output(["ninja", "--version"], text=True).strip(),
-    }
+    return common.machine_stats()
 
 
 def c_env(cache):
@@ -344,6 +277,14 @@ def main():
                 "cmake_configure": cmake_config,
             },
         }
+        result["standard"] = common.standard_contract(
+            clean_c=c["clean"], clean_ninja=ninja["clean"],
+            noop_c=c["noop"], noop_ninja=ninja["noop"],
+            incremental_c=c["real_update"], incremental_ninja=ninja["real_update"],
+            incremental_description=f"real SDL3 update {BASE[:8]}..{CHANGE[:8]}",
+            rebuilt_tus={"c": c["translation_units_rebuilt"], "cmake_ninja": ninja["translation_units_rebuilt"]},
+            runs={"clean": CLEAN_RUNS, "noop": NOOP_RUNS, "incremental": CHANGE_RUNS},
+        )
         print("STATS_JSON=" + json.dumps(result, sort_keys=True))
         print(f"Rebuilt TUs: c={c['translation_units_rebuilt']} ninja={ninja['translation_units_rebuilt']}")
         print(f"Archive only: c={c['archive_only']['wall_ms']:.1f} ms ninja={ninja['archive_only']['wall_ms']:.1f} ms")

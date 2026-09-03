@@ -8,10 +8,10 @@ REPO='https://github.com/DaveGamble/cJSON.git'
 REV='v1.7.19'
 TARGET='cjson'
 MARKER='CMakeFiles/cjson.dir'
-CLEAN_RUNS=5
-NOOP_RUNS=30
-CHANGE_RUNS=10
-CONFIG_RUNS=5
+CLEAN_RUNS=common.STANDARD_CLEAN_RUNS
+NOOP_RUNS=common.STANDARD_NOOP_RUNS
+CHANGE_RUNS=common.STANDARD_INCREMENTAL_RUNS
+CONFIG_RUNS=common.STANDARD_CONFIG_RUNS
 
 def cmake_args(src, build):
     return ['cmake','-S',str(src),'-B',str(build),'-G','Ninja',
@@ -79,10 +79,17 @@ def main():
                 'c':{'clean':common.summarize(cclean),'noop':common.summarize(cnoop),'one_source_changed':common.summarize(cchange),'translation_units_rebuilt':crebuilt},
                 'cmake_ninja':{'clean':common.summarize(nclean),'noop':common.summarize(nnoop),'one_source_changed':common.summarize(nchange),'translation_units_rebuilt':nrebuilt},
                 'runs':{'clean':CLEAN_RUNS,'noop':NOOP_RUNS,'change':CHANGE_RUNS,'configuration':CONFIG_RUNS}}
+        result['standard']=common.standard_contract(
+            clean_c=result['c']['clean'], clean_ninja=result['cmake_ninja']['clean'],
+            noop_c=result['c']['noop'], noop_ninja=result['cmake_ninja']['noop'],
+            incremental_c=result['c']['one_source_changed'], incremental_ninja=result['cmake_ninja']['one_source_changed'],
+            incremental_description='one source file changed',
+            rebuilt_tus={'c':crebuilt,'cmake_ninja':nrebuilt},
+            runs={'clean':CLEAN_RUNS,'noop':NOOP_RUNS,'incremental':CHANGE_RUNS})
         out=common.ROOT/'benchmarks'/'cjson'; out.mkdir(parents=True,exist_ok=True)
         (out/'results.json').write_text(json.dumps(result,indent=2,sort_keys=True)+'\n')
         def fmt(ms): return f'{ms/1000:.2f} s' if ms>=1000 else f'{ms:.1f} ms'
-        md=f'''# cJSON overhead benchmark\n\nPinned cJSON {REV}, one C translation unit. Lower is better.\n\n| Test | C-BuildSystem | CMake + Ninja |\n| --- | ---: | ---: |\n| Fresh build-system setup | {fmt(result['configuration']['c_fresh_build_script_cache']['wall_ms'])} | {fmt(result['configuration']['cmake_configure']['wall_ms'])} |\n| Clean build | {fmt(result['c']['clean']['wall_ms'])} | {fmt(result['cmake_ninja']['clean']['wall_ms'])} |\n| No changes | {fmt(result['c']['noop']['wall_ms'])} | {fmt(result['cmake_ninja']['noop']['wall_ms'])} |\n| One source changed | {fmt(result['c']['one_source_changed']['wall_ms'])} | {fmt(result['cmake_ninja']['one_source_changed']['wall_ms'])} |\n\nNo-op is the median of {NOOP_RUNS} runs. Object caching is disabled. Both systems rebuild exactly one TU after the source edit.\n'''
+        md=f'''# cJSON overhead benchmark\n\nPinned cJSON {REV}, one C translation unit. Lower is better.\n\n| Test | C-BuildSystem | CMake + Ninja |\n| --- | ---: | ---: |\n| Fresh build-system setup | {fmt(result['configuration']['c_fresh_build_script_cache']['wall_ms'])} | {fmt(result['configuration']['cmake_configure']['wall_ms'])} |\n| Clean build | {fmt(result['c']['clean']['wall_ms'])} | {fmt(result['cmake_ninja']['clean']['wall_ms'])} |\n| No changes | {fmt(result['c']['noop']['wall_ms'])} | {fmt(result['cmake_ninja']['noop']['wall_ms'])} |\n| One source changed | {fmt(result['c']['one_source_changed']['wall_ms'])} | {fmt(result['cmake_ninja']['one_source_changed']['wall_ms'])} |\n\nStandard scenarios: clean={CLEAN_RUNS} runs, no-op={NOOP_RUNS}, incremental={CHANGE_RUNS}; reported wall time is the median. Object caching is disabled. Both systems rebuild exactly one TU after the source edit.\n'''
         (out/'README.md').write_text(md)
         print('CJSON_JSON='+json.dumps(result,sort_keys=True))
         print(md)
