@@ -24,6 +24,7 @@ cleanup() {
 trap cleanup EXIT INT TERM HUP
 
 sh "$RUNTIME_TESTS/smoke.sh" "$C_BIN" "$INC"
+sh "$RUNTIME_TESTS/version_1_0.sh" "$C_BIN"
 sh "$RUNTIME_TESTS/wrapper_backends.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/dependency.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/offline_dependency.sh" "$C_BIN" "$INC"
@@ -39,6 +40,7 @@ sh "$RUNTIME_TESTS/direct_header.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/test_command.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/profiles.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/incremental_correctness.sh" "$C_BIN" "$INC"
+sh "$RUNTIME_TESTS/project_lock.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/interrupted_compile.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/cache_artifact_recovery.sh" "$C_BIN" "$INC"
 sh "$RUNTIME_TESTS/filesystem_failure.sh" "$C_BIN" "$INC"

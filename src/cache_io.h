@@ -23,13 +23,197 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <spawn.h>
+#include <sys/file.h>
+#include <sys/stat.h>
 #ifdef __APPLE__
+#include <crt_externs.h>
 #include <mach-o/dyld.h>
 #endif
 
 #ifndef PATH_MAX
 #define PATH_MAX 4096
 #endif
+
+
+/*
+ * Native commands mutate project-local build state. Serialize those
+ * commands per canonical working directory so two independent `c`
+ * processes cannot publish the same object, depfile, link output or
+ * compile_commands.json concurrently. Different projects use
+ * different lock keys and remain fully parallel.
+ *
+ * flock() is intentionally used here: the lock is shared across the
+ * cli fork, allowing `c run` to release it immediately before the
+ * finished program is spawned instead of holding it for the lifetime
+ * of the user's application.
+ */
+static int c_project_lock_fd = -1;
+static int c_project_release_for_run = 0;
+
+static int c_project_action_name(const char *arg) {
+    static const char *const actions[] = {
+        "init", "build", "run", "watch", "fetch", "update",
+        "deps", "test", "clean", "cache"
+    };
+    if (!arg) return 0;
+    for (size_t i = 0; i < sizeof(actions) / sizeof(actions[0]); ++i)
+        if (!strcmp(arg, actions[i])) return 1;
+    return 0;
+}
+
+static void c_project_consider_arg(const char *arg, int *need_lock, int *release_for_run) {
+    if (!arg || !*arg) return;
+    if (!strcmp(arg, "run")) *release_for_run = 1;
+    if (c_project_action_name(arg)) *need_lock = 1;
+}
+
+static void c_project_command_flags(int *need_lock, int *release_for_run) {
+    *need_lock = 0;
+    *release_for_run = 0;
+#ifdef __APPLE__
+    int argc = *_NSGetArgc();
+    char **argv = *_NSGetArgv();
+    if (!argv || argc < 1) { *need_lock = 1; return; }
+    for (int i = 1; i < argc; ++i) {
+        if (!strcmp(argv[i], "--")) break;
+        c_project_consider_arg(argv[i], need_lock, release_for_run);
+    }
+#else
+    int fd = open("/proc/self/cmdline", O_RDONLY);
+    if (fd < 0) { *need_lock = 1; return; }
+    char buf[16384];
+    ssize_t got = read(fd, buf, sizeof(buf) - 1);
+    close(fd);
+    if (got <= 0) { *need_lock = 1; return; }
+    buf[got] = '\0';
+    size_t off = 0;
+    int index = 0;
+    while (off < (size_t)got) {
+        size_t left = (size_t)got - off;
+        size_t len = strnlen(buf + off, left);
+        if (len == left) break;
+        if (index > 0) {
+            if (!strcmp(buf + off, "--")) break;
+            c_project_consider_arg(buf + off, need_lock, release_for_run);
+        }
+        off += len + 1;
+        ++index;
+    }
+#endif
+}
+
+static uint64_t c_project_path_hash(const char *s) {
+    uint64_t h = 1469598103934665603ULL;
+    const unsigned char *p = (const unsigned char *)s;
+    while (*p) { h ^= *p++; h *= 1099511628211ULL; }
+    return h;
+}
+
+static void c_project_lock_release(void) {
+    if (c_project_lock_fd >= 0) {
+        (void)flock(c_project_lock_fd, LOCK_UN);
+        close(c_project_lock_fd);
+        c_project_lock_fd = -1;
+    }
+    (void)unsetenv("C_PROJECT_LOCK_KEY");
+}
+
+static void c_project_lock_fail(const char *what) {
+    int saved = errno;
+    fprintf(stderr, "c: error: project lock %s: %s\n", what, strerror(saved));
+    _exit(1);
+}
+
+__attribute__((constructor))
+static void c_project_lock_acquire(void) {
+    int need_lock = 0, release_for_run = 0;
+    c_project_command_flags(&need_lock, &release_for_run);
+    if (!need_lock) return;
+
+    char cwd[PATH_MAX], canonical[PATH_MAX];
+    if (!getcwd(cwd, sizeof(cwd))) c_project_lock_fail("getcwd");
+    const char *identity = cwd;
+    if (realpath(cwd, canonical)) identity = canonical;
+
+    char key[17];
+    if (snprintf(key, sizeof(key), "%016llx",
+                 (unsigned long long)c_project_path_hash(identity)) >= (int)sizeof(key)) {
+        errno = ENAMETOOLONG;
+        c_project_lock_fail("key");
+    }
+
+    const char *held = getenv("C_PROJECT_LOCK_KEY");
+    if (held && !strcmp(held, key)) {
+        c_project_release_for_run = release_for_run;
+        return;
+    }
+
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    char root[PATH_MAX], lock_path[PATH_MAX];
+    int n = snprintf(root, sizeof(root), "%s%sc-buildsystem-locks-%lu",
+                     tmp, tmp[strlen(tmp) - 1] == '/' ? "" : "/",
+                     (unsigned long)getuid());
+    if (n < 0 || n >= (int)sizeof(root)) {
+        errno = ENAMETOOLONG;
+        c_project_lock_fail("directory path");
+    }
+    if (mkdir(root, 0700) != 0 && errno != EEXIST)
+        c_project_lock_fail("directory create");
+    struct stat st;
+    if (lstat(root, &st) != 0 || !S_ISDIR(st.st_mode) || st.st_uid != getuid()) {
+        errno = EPERM;
+        c_project_lock_fail("directory ownership");
+    }
+    n = snprintf(lock_path, sizeof(lock_path), "%s/%s.lock", root, key);
+    if (n < 0 || n >= (int)sizeof(lock_path)) {
+        errno = ENAMETOOLONG;
+        c_project_lock_fail("file path");
+    }
+
+    int flags = O_RDWR | O_CREAT;
+#ifdef O_CLOEXEC
+    flags |= O_CLOEXEC;
+#endif
+    int fd = open(lock_path, flags, 0600);
+    if (fd < 0) c_project_lock_fail("open");
+    while (flock(fd, LOCK_EX) != 0) {
+        if (errno == EINTR) continue;
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        c_project_lock_fail("acquire");
+    }
+    c_project_lock_fd = fd;
+    c_project_release_for_run = release_for_run;
+    if (setenv("C_PROJECT_LOCK_KEY", key, 1) != 0) {
+        int saved = errno;
+        c_project_lock_release();
+        errno = saved;
+        c_project_lock_fail("environment");
+    }
+}
+
+__attribute__((destructor))
+static void c_project_lock_cleanup(void) {
+    c_project_lock_release();
+}
+
+static int c_project_runtime_path(const char *path) {
+    return path &&
+        (!strncmp(path, "./build/debug/", 14) ||
+         !strncmp(path, "./build/release/", 16));
+}
+
+static int c_project_posix_spawnp(pid_t *pid, const char *path,
+                                  const posix_spawn_file_actions_t *file_actions,
+                                  const posix_spawnattr_t *attrp,
+                                  char *const argv[], char *const envp[]) {
+    if (c_project_release_for_run && c_project_runtime_path(path))
+        c_project_lock_release();
+    return posix_spawnp(pid, path, file_actions, attrp, argv, envp);
+}
 
 /*
  * main.c historically copied cbuild.h to <cache>/scripts/cbuild.h and then
@@ -227,5 +411,6 @@ static int c_direct_header_execvp(const char *file, char *const argv[]) {
 
 #define fopen c_direct_header_fopen
 #define execvp c_direct_header_execvp
+#define posix_spawnp c_project_posix_spawnp
 
 #endif

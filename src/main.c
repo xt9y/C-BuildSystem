@@ -28,7 +28,7 @@
 #define PATH_MAX 4096
 #endif
 
-#define C_VERSION "0.1.0"
+#define C_VERSION "1.0.0"
 #define C_ARRAY_LEN(x) (sizeof(x) / sizeof((x)[0]))
 
 typedef struct StrVec {
