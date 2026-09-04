@@ -1,4 +1,4 @@
-name: Benchmark CI
+name: CI
 
 on:
   workflow_dispatch:
@@ -6,12 +6,219 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   BENCH_JOBS: 2
 
 jobs:
+  linux:
+    name: Linux (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04 x86_64 / GCC
+            runner: ubuntu-22.04
+            cc: gcc
+            cxx: g++
+          - name: Ubuntu 24.04 x86_64 / GCC
+            runner: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - name: Ubuntu 24.04 x86_64 / Clang
+            runner: ubuntu-24.04
+            cc: clang
+            cxx: clang++
+          - name: Ubuntu 24.04 arm64 / GCC
+            runner: ubuntu-24.04-arm
+            cc: gcc
+            cxx: g++
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          uname -a
+          "$CC" --version | head -1
+          "$CXX" --version | head -1
+      - name: Build
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: make clean all
+      - name: Test
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: make test
+
+  macos:
+    name: macOS (${{ matrix.name }})
+    needs: linux
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: 15 arm64
+            runner: macos-15
+          - name: 15 Intel
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Toolchain
+        run: |
+          uname -a
+          cc --version | head -1
+          c++ --version | head -1
+      - name: Build
+        run: make clean all
+      - name: Test
+        run: make test
+
+  distro-smoke:
+    name: Distro (${{ matrix.name }})
+    needs: macos
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Debian 13 x86_64
+            image: debian:13-slim
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3 cmake
+          - name: Alpine 3.22 x86_64 / musl
+            image: alpine:3.22
+            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3 cmake
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test in distro
+        env:
+          IMAGE: ${{ matrix.image }}
+          SETUP: ${{ matrix.setup }}
+        run: |
+          docker run --rm \
+            -e SETUP="$SETUP" \
+            -v "$PWD:/src" -w /src \
+            "$IMAGE" sh -lc 'set -eu; eval "$SETUP"; make clean all; make test'
+
+  sanitizers:
+    name: ASan + UBSan
+    needs: distro-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify Clang
+        run: clang --version
+      - name: Build with sanitizers
+        env:
+          CC: clang
+          CFLAGS: -std=c11 -O1 -g -Wall -Wextra -Wpedantic -fsanitize=address,undefined -fno-omit-frame-pointer
+        run: make clean all
+      - name: Test with sanitizers
+        env:
+          CC: clang
+          CXX: clang++
+          ASAN_OPTIONS: detect_leaks=1:strict_string_checks=1:check_initialization_order=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+        run: make test
+
+  fuzz-smoke:
+    name: Fuzz smoke
+    needs: sanitizers
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Verify fuzz toolchain
+        run: |
+          set -eu
+          clang --version
+          cov="$(command -v llvm-cov || command -v llvm-cov-21 || command -v llvm-cov-20 || command -v llvm-cov-19 || command -v llvm-cov-18 || command -v llvm-cov-17 || true)"
+          prof="$(command -v llvm-profdata || command -v llvm-profdata-21 || command -v llvm-profdata-20 || command -v llvm-profdata-19 || command -v llvm-profdata-18 || command -v llvm-profdata-17 || true)"
+          if [ -z "$cov" ] || [ -z "$prof" ]; then
+            sudo apt-get -o Acquire::Retries=3 update
+            sudo apt-get -o Acquire::Retries=3 install -y llvm
+            cov="$(command -v llvm-cov)"
+            prof="$(command -v llvm-profdata)"
+          fi
+          "$cov" --version
+          "$prof" --version
+      - name: Prepare fuzz harness
+        run: cp -R .github/ci/fuzz fuzz
+      - name: Build fuzz targets with sanitizers and coverage
+        env:
+          CC: clang
+          FUZZ_COVERAGE: 1
+        run: ./fuzz/build.sh
+      - name: Fuzz smoke
+        env:
+          FUZZ_PROFILE_DIR: ${{ github.workspace }}/fuzz/profiles
+        run: |
+          ./fuzz/run-one.sh lockfile 20
+          ./fuzz/run-one.sh depfile 20
+          ./fuzz/run-one.sh cache 20
+          ./fuzz/run-one.sh cli 20
+          ./fuzz/run-one.sh fs 20
+          ./fuzz/run-one.sh project 30
+      - name: Coverage and regression gates
+        env:
+          FUZZ_PROFILE_DIR: ${{ github.workspace }}/fuzz/profiles
+        run: ./fuzz/coverage-report.sh
+      - name: Publish fuzz summary
+        if: success() || failure()
+        run: |
+          if [ -s fuzz/coverage/coverage.md ]; then
+            cat fuzz/coverage/coverage.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            {
+              echo '## Fuzz coverage'
+              echo
+              echo 'Coverage report was not produced.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - name: Upload fuzz evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-smoke-${{ github.run_id }}
+          path: |
+            fuzz/coverage/
+            fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  real-projects:
+    name: Real projects
+    needs: fuzz-smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install BGE system dependencies
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 install -y \
+            libgl1-mesa-dev libx11-dev libxrandr-dev libxi-dev \
+            libxinerama-dev libxcursor-dev libxext-dev
+      - name: Build C-BuildSystem
+        run: make clean all
+      - name: Validate pinned real projects
+        run: .github/ci/real-projects.sh "$PWD/build/c" "$PWD/include"
+
   benchmark-cjson:
     name: cJSON benchmark
+    needs: real-projects
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
@@ -165,11 +372,7 @@ jobs:
 
   benchmark-release:
     name: Benchmark summary + release
-    needs:
-      - benchmark-cjson
-      - benchmark-fanout
-      - benchmark-sdl3
-      - benchmark-large
+    needs: benchmark-large
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -190,7 +393,7 @@ jobs:
           {
             echo '# C-BuildSystem benchmark results'
             echo
-            echo 'Manual benchmark run with the standardized C-BuildSystem benchmark suite.'
+            echo 'Manual CI run with the standardized C-BuildSystem validation and benchmark suite.'
             echo
             echo '| Field | Value |'
             echo '| --- | --- |'
@@ -200,7 +403,9 @@ jobs:
             echo "| BENCH_JOBS | \`${BENCH_JOBS}\` |"
             echo "| Generated | ${generated} |"
             echo
-            echo 'Benchmarks run sequentially: cJSON → libcurl fan-out → SDL3 → Wireshark.'
+            echo 'Validation runs first: Linux → macOS → distro smoke → sanitizers → fuzz smoke → real projects.'
+            echo
+            echo 'Benchmarks then run sequentially: cJSON → libcurl fan-out → SDL3 → Wireshark.'
             echo
             echo 'Release assets include raw JSON results, benchmark logs, readable Markdown summaries, SVG tables/charts, complete per-benchmark archives, and one combined archive.'
           } > benchmark-summary.md
