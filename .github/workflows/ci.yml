@@ -98,10 +98,10 @@ jobs:
         include:
           - name: Debian 13 x86_64
             image: debian:13-slim
-            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3 cmake
           - name: Alpine 3.22 x86_64 / musl
             image: alpine:3.22
-            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3
+            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3 cmake
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
