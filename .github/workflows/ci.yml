@@ -98,10 +98,10 @@ jobs:
         include:
           - name: Debian 13 x86_64
             image: debian:13-slim
-            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3
+            setup: apt-get update && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential git ca-certificates python3 cmake
           - name: Alpine 3.22 x86_64 / musl
             image: alpine:3.22
-            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3
+            setup: apk add --no-cache build-base git bash coreutils findutils grep sed python3 cmake
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
@@ -114,7 +114,7 @@ jobs:
           docker run --rm \
             -e SETUP="$SETUP" \
             -v "$PWD:/src" -w /src \
-            "$IMAGE" sh -lc '$SETUP && make clean all && make test'
+            "$IMAGE" sh -lc 'set -eu; eval "$SETUP"; make clean all; make test'
 
   sanitizers:
     name: ASan + UBSan
@@ -425,6 +425,11 @@ jobs:
       - uses: actions/checkout@v5
         with:
           fetch-depth: 0
+      - name: Verify release identity
+        run: |
+          make clean all
+          test "$(./build/c --version)" = "1.0.0"
+          ./build/c doctor | grep -q '^c 1\.0\.0$'
       - name: Tag and publish first stable release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -3,7 +3,6 @@
 
 #include <sys/ioctl.h>
 #ifdef __linux__
-#include <linux/fs.h>
 #ifndef FICLONE
 #define FICLONE _IOW(0x94, 9, int)
 #endif

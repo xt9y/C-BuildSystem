@@ -18,6 +18,8 @@ First stable C-BuildSystem release.
 - Added pinned real-project validation for BGE, cJSON and inih.
 - Expanded hosted CI across Ubuntu x86_64/arm64, GCC/Clang, macOS arm64/Intel, Debian and Alpine/musl.
 - Existing sanitizer and fuzz gates remain part of the correctness chain.
+- Serialize simultaneous native build actions for the same project with a per-project host lock while leaving different projects independent.
+- Removed the Linux-kernel-header dependency from the reflink fast path so Alpine/musl builds against the supported libc toolchain.
 
 ### Benchmarks
 
