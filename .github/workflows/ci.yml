@@ -449,13 +449,13 @@ jobs:
           tag="benchmark-run-${GITHUB_RUN_ID}"
           title="C-BuildSystem Benchmarks #${GITHUB_RUN_NUMBER}"
 
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release edit "$tag" \
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" \
               --title "$title" \
               --notes-file benchmark-summary.md
-            gh release upload "$tag" release-assets/* --clobber
+            gh release upload "$tag" release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
           else
-            gh release create "$tag" \
+            gh release create "$tag" --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
               --title "$title" \
               --notes-file benchmark-summary.md \
