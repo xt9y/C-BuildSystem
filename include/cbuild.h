@@ -44,7 +44,8 @@ typedef enum C_TargetKind {
 typedef enum C_DepKind {
     C_DEP_HEADER_ONLY = 0,
     C_DEP_RESERVED = 1,
-    C_DEP_SOURCE = 2
+    C_DEP_SOURCE = 2,
+    C_DEP_CBUILD = 3
 } C_DepKind;
 
 typedef enum C_Standard {
@@ -70,6 +71,8 @@ typedef struct C_Dependency {
     C_StringList include_dirs;
     C_StringList source_patterns;
     C_StringList compile_flags;
+    char build_target[C_MAX_NAME];
+    C_TargetKind build_target_kind;
 } C_Dependency;
 
 typedef struct C_Target {
@@ -268,6 +271,15 @@ static inline C_Dependency *c_git(C_Build *b, const char *name, const char *git,
 
 static inline void c_dep_header_only(C_Dependency *d) { if (!d) c__fatal("c_dep_header_only received a null dependency"); d->kind = C_DEP_HEADER_ONLY; }
 static inline void c_dep_source(C_Dependency *d) { if (!d) c__fatal("c_dep_source received a null dependency"); d->kind = C_DEP_SOURCE; }
+static inline void c_dep_cbuild(C_Dependency *d, const char *target, C_TargetKind kind) {
+    if (!d) c__fatal("c_dep_cbuild received a null dependency");
+    c__require_name(target, "dependency target");
+    if (kind != C_TARGET_STATIC_LIBRARY && kind != C_TARGET_SHARED_LIBRARY)
+        c__fatal("c_dep_cbuild currently supports static or shared library targets");
+    d->kind = C_DEP_CBUILD;
+    c__copy(d->build_target, sizeof(d->build_target), target);
+    d->build_target_kind = kind;
+}
 static inline void c_dep_include(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_include received a null dependency"); c__push(&d->include_dirs, path); }
 static inline void c_dep_sources(C_Dependency *d, const char *pattern) { if (!d) c__fatal("c_dep_sources received a null dependency"); c__push(&d->source_patterns, pattern); }
 static inline void c_dep_subdir(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_subdir received a null dependency"); c__copy(d->subdir, sizeof(d->subdir), path); }
