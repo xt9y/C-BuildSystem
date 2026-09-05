@@ -460,4 +460,6 @@ static void compiler_watch_sleep(void) {
     while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
 }
 
+#include "cbuild_target_dep.h"
+
 #endif
