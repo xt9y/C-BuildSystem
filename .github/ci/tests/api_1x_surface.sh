@@ -41,6 +41,7 @@ static void verify_surface(void) {
     C_Dependency *(*p_git)(C_Build *, const char *, const char *, const char *) = c_git;
     void (*p_dep_header_only)(C_Dependency *) = c_dep_header_only;
     void (*p_dep_source)(C_Dependency *) = c_dep_source;
+    void (*p_dep_cbuild)(C_Dependency *, const char *, C_TargetKind) = c_dep_cbuild;
     void (*p_dep_include)(C_Dependency *, const char *) = c_dep_include;
     void (*p_dep_sources)(C_Dependency *, const char *) = c_dep_sources;
     void (*p_dep_subdir)(C_Dependency *, const char *) = c_dep_subdir;
@@ -50,7 +51,7 @@ static void verify_surface(void) {
     C_TargetKind target_kinds[] = {
         C_TARGET_EXECUTABLE, C_TARGET_STATIC_LIBRARY, C_TARGET_TEST, C_TARGET_SHARED_LIBRARY
     };
-    C_DepKind dep_kinds[] = { C_DEP_HEADER_ONLY, C_DEP_RESERVED, C_DEP_SOURCE };
+    C_DepKind dep_kinds[] = { C_DEP_HEADER_ONLY, C_DEP_RESERVED, C_DEP_SOURCE, C_DEP_CBUILD };
     C_Standard standards[] = {
         C_STANDARD_C99, C_STANDARD_C11, C_STANDARD_C17, C_STANDARD_C23
     };
@@ -60,7 +61,7 @@ static void verify_surface(void) {
     (void)p_flag; (void)p_link_flag; (void)p_link_system; (void)p_framework;
     (void)p_unity; (void)p_unity_auto; (void)p_no_unity; (void)p_standard;
     (void)p_warnings_strict; (void)p_generate; (void)p_link_target; (void)p_git;
-    (void)p_dep_header_only; (void)p_dep_source; (void)p_dep_include;
+    (void)p_dep_header_only; (void)p_dep_source; (void)p_dep_cbuild; (void)p_dep_include;
     (void)p_dep_sources; (void)p_dep_subdir; (void)p_dep_flag; (void)p_use;
     (void)target_kinds; (void)dep_kinds; (void)standards;
 }
