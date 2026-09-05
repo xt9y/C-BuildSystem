@@ -19,7 +19,7 @@ endif
 
 all: $(TARGET)
 
-$(NATIVE): src/cli.c src/main.c src/cache_io.h src/perf_v2.h include/cbuild.h
+$(NATIVE): src/cli.c src/main.c src/cache_io.h src/perf_v2.h src/cbuild_target_dep.h include/cbuild.h
 	mkdir -p $(BUILD)
 	$(CC) $(CPPFLAGS) $(PORTABILITY_CPPFLAGS) $(CFLAGS) -include src/cache_io.h -Iinclude -DCBUILD_HEADER_PATH='"$(abspath include/cbuild.h)"' src/cli.c $(LDLIBS) -o $(NATIVE)
 
