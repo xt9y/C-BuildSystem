@@ -180,9 +180,9 @@ static void compiler_dep_cache_store(const char *depfile, const StrVec *deps) {
 }
 
 static bool compiler_read_depfile_persistent(const char *path, StrVec *deps) {
-    if (compiler_dep_cache_load(path, deps)) return true;
+    if (compiler_dep_cache_load(depfile, deps)) return true;
     if (!compiler_read_depfile(path, deps)) return false;
-    compiler_dep_cache_store(path, deps);
+    compiler_dep_cache_store(depfile, deps);
     return true;
 }
 
@@ -381,20 +381,23 @@ static void compiler_append_linker(StrVec *a) {
 /*
  * Atomic publication links into a temporary path and renames the finished
  * artifact. Darwin records that temporary path as a dylib's install name
- * unless an explicit stable name is supplied, leaving consumers pointing at
- * a directory that is deleted immediately after publication.
+ * unless an explicit stable name is supplied. Default to a relocatable
+ * @rpath identity, while preserving an install name explicitly supplied by
+ * the project.
  */
 static int compiler_run_process_atomic_output(StrVec *args, bool verbose, const char *output) {
     bool dynamic_library = false;
+    bool has_install_name = false;
     for (size_t i = 0; i < args->count; ++i) {
-        if (!strcmp(args->items[i], "-dynamiclib")) {
-            dynamic_library = true;
-            break;
-        }
+        const char *arg = args->items[i];
+        if (!strcmp(arg, "-dynamiclib")) dynamic_library = true;
+        if (strstr(arg, "-install_name") != NULL) has_install_name = true;
     }
-    if (dynamic_library) {
-        char install_name[PATH_MAX + 32];
-        int n = snprintf(install_name, sizeof(install_name), "-Wl,-install_name,%s", output);
+    if (dynamic_library && !has_install_name) {
+        const char *base = strrchr(output, '/');
+        base = base ? base + 1 : output;
+        char install_name[C_MAX_NAME + 64];
+        int n = snprintf(install_name, sizeof(install_name), "-Wl,-install_name,@rpath/%s", base);
         if (n < 0 || n >= (int)sizeof(install_name)) {
             errno = ENAMETOOLONG;
             return 1;
