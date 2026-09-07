@@ -69,13 +69,15 @@ SRC
 (
     cd "$APP"
     C_INCLUDE_DIR="$INC" "$C_BIN" build
-    test "$(./build/debug/app)" = 42
 
     if [ "$(uname -s)" = Darwin ]; then
-        otool -L ./build/debug/app | grep -q 'libdependency.dylib'
+        test "$(otool -D "$LIB/build/debug/libdependency.dylib" | tail -n +2)" = '@rpath/libdependency.dylib'
+        otool -L ./build/debug/app | grep -q '@rpath/libdependency.dylib'
     else
         ldd ./build/debug/app | grep -q 'libdependency.so'
     fi
+
+    test "$(./build/debug/app)" = 42
 )
 
 echo "cbuild-target-dependency: ok"
