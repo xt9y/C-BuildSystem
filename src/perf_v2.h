@@ -180,9 +180,9 @@ static void compiler_dep_cache_store(const char *depfile, const StrVec *deps) {
 }
 
 static bool compiler_read_depfile_persistent(const char *path, StrVec *deps) {
-    if (compiler_dep_cache_load(depfile, deps)) return true;
+    if (compiler_dep_cache_load(path, deps)) return true;
     if (!compiler_read_depfile(path, deps)) return false;
-    compiler_dep_cache_store(depfile, deps);
+    compiler_dep_cache_store(path, deps);
     return true;
 }
 
