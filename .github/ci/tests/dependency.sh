@@ -35,8 +35,21 @@ void build(C_Build *b) {
 EOF2
 cat > src/main.c <<'SRC'
 #include <stdio.h>
+#include <string.h>
 #include <answer.h>
-int main(void) { printf("%d\n", ANSWER); return ANSWER == 42 ? 0 : 1; }
+
+int main(void) {
+    const char *asset = c_asset("answer", "Font/font.png");
+    if (!asset || c_asset("answer", "missing.file") != NULL) return 2;
+    FILE *f = fopen(asset, "rb");
+    if (!f) return 3;
+    char value[32] = {0};
+    if (!fgets(value, sizeof(value), f)) { fclose(f); return 4; }
+    fclose(f);
+    value[strcspn(value, "\r\n")] = '\0';
+    printf("%d %s\n", ANSWER, value);
+    return ANSWER == 42 && !strncmp(value, "font-v", 6) ? 0 : 5;
+}
 SRC
 "$C_BIN" fetch
 [ -f c.lock ]
@@ -48,6 +61,7 @@ mirror_cache="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*
 [ -n "$mirror_cache" ]
 [ -f "$src_cache.c-ready" ]
 [ -f "$mirror_cache.c-ready" ]
+[ ! -e Font ]
 
 # A failed checkout used to leave this directory behind and permanently poison
 # the cache. Replace a known-good checkout with a partial one and require c to
@@ -55,10 +69,11 @@ mirror_cache="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*
 rm -rf "$src_cache" "$src_cache.c-ready"
 mkdir -p "$src_cache"
 printf '#define ANSWER 0\n' > "$src_cache/answer.h"
-"$C_BIN" run | grep -q '^42$'
+"$C_BIN" run | grep -q '^42 font-v1$'
 [ -f "$src_cache.c-ready" ]
 grep -q 'ANSWER 42' "$src_cache/answer.h"
-[ "$(cat Font/font.png)" = "font-v1" ]
+[ ! -e Font ]
+[ "$(cat "$src_cache/font.png")" = "font-v1" ]
 
 # A failed `git clone --mirror` has the same failure mode. A malformed mirror
 # directory must be discarded and cloned again on the next invocation.
@@ -69,7 +84,8 @@ printf 'not-a-git-repository\n' > "$mirror_cache/HEAD"
 [ -f "$mirror_cache.c-ready" ]
 git --git-dir="$mirror_cache" rev-parse --verify 'HEAD^{commit}' >/dev/null
 
-"$C_BIN" run | grep -q '^42$'
+"$C_BIN" run | grep -q '^42 font-v1$'
+[ ! -e Font ]
 old="$(grep resolved c.lock)"
 old_src="$src_cache"
 old_mirror="$mirror_cache"
@@ -100,8 +116,8 @@ new="$(grep resolved c.lock)"
 # The mirror is keyed by URL, so updating a ref on the same URL must reuse it.
 [ -d "$old_mirror" ]
 [ -f "$old_mirror.c-ready" ]
-"$C_BIN" run >/dev/null
-[ "$(cat Font/font.png)" = "font-v2" ]
+"$C_BIN" run | grep -q '^42 font-v2$'
+[ ! -e Font ]
 
 # If a dependency changes URL, the old mirror is no longer useful to this
 # project and must be reclaimed after the successful update.
@@ -118,6 +134,8 @@ current_src="$(find "$C_CACHE_DIR/src" -mindepth 1 -maxdepth 1 -type d -name 'an
 [ -d "$new_mirror" ]
 [ -n "$current_src" ]
 [ -d "$current_src" ]
+"$C_BIN" run | grep -q '^42 font-v2$'
+[ ! -e Font ]
 
 # Cleanup is post-success only. A failed update must not destroy the last
 # usable checkout or mirror.
@@ -131,6 +149,7 @@ fi
 [ -f "$new_mirror.c-ready" ]
 [ -d "$current_src" ]
 [ -f "$current_src.c-ready" ]
+[ ! -e Font ]
 mv build.c.good build.c
 
 [ "$($C_BIN cache)" = "$ROOT/cache" ]
