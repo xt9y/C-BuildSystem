@@ -113,12 +113,31 @@ mv build.c.new build.c
 [ ! -e "$old_mirror" ]
 [ ! -e "$old_mirror.c-ready" ]
 new_mirror="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*.git' | head -n 1)"
+current_src="$(find "$C_CACHE_DIR/src" -mindepth 1 -maxdepth 1 -type d -name 'answer-*' | head -n 1)"
 [ -n "$new_mirror" ]
 [ -d "$new_mirror" ]
+[ -n "$current_src" ]
+[ -d "$current_src" ]
+
+# Cleanup is post-success only. A failed update must not destroy the last
+# usable checkout or mirror.
+cp build.c build.c.good
+sed "s|$git_url2|$ROOT/does-not-exist|" build.c.good > build.c
+if "$C_BIN" update answer >/dev/null 2>&1; then
+    echo "expected update failure" >&2
+    exit 1
+fi
+[ -d "$new_mirror" ]
+[ -f "$new_mirror.c-ready" ]
+[ -d "$current_src" ]
+[ -f "$current_src.c-ready" ]
+mv build.c.good build.c
 
 [ "$($C_BIN cache)" = "$ROOT/cache" ]
 mkdir -p "$C_CACHE_DIR/unrelated"
 printf 'remove-me\n' > "$C_CACHE_DIR/unrelated/data"
+# cclean is global and must work even outside a project directory.
+cd "$ROOT"
 "$C_BIN" cclean >/dev/null
 [ ! -e "$ROOT/cache" ]
 echo "dependency: ok"
