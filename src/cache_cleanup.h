@@ -237,6 +237,115 @@ static bool c_cache_cleanup_name_seen(char names[][C_CACHE_CLEANUP_NAME_MAX], si
     return false;
 }
 
+static bool c_cache_cleanup_source_path(const char *cache, const C_CacheCleanupEntry *entry, char out[PATH_MAX]) {
+    char src_root[PATH_MAX], input[C_CACHE_CLEANUP_URL_MAX + 128], key[17], name[C_CACHE_CLEANUP_NAME_MAX + 32];
+    if (!entry || !entry->name[0] || !entry->url[0] || !entry->resolved[0]) return false;
+    if (snprintf(input, sizeof(input), "%s:%s", entry->url, entry->resolved) >= (int)sizeof(input)) return false;
+    c_cache_cleanup_hash_hex(input, key);
+    if (snprintf(name, sizeof(name), "%s-%s", entry->name, key) >= (int)sizeof(name)) return false;
+    c_cache_cleanup_join(src_root, cache, "src");
+    c_cache_cleanup_join(out, src_root, name);
+    return true;
+}
+
+static bool c_cache_cleanup_asset_manifest(const char *cache, const char *dependency, char out[PATH_MAX]) {
+    char cwd[PATH_MAX], assets[PATH_MAX], project_key[17], project_dir[PATH_MAX], dep_key[17], filename[32];
+    if (!getcwd(cwd, sizeof(cwd))) return false;
+    c_cache_cleanup_join(assets, cache, "assets");
+    c_cache_cleanup_hash_hex(cwd, project_key);
+    c_cache_cleanup_join(project_dir, assets, project_key);
+    c_cache_cleanup_hash_hex(dependency, dep_key);
+    if (snprintf(filename, sizeof(filename), "%s.bin", dep_key) >= (int)sizeof(filename)) return false;
+    c_cache_cleanup_join(out, project_dir, filename);
+    return true;
+}
+
+static int c_cache_cleanup_read0(FILE *file, char *out, size_t cap) {
+    size_t n = 0;
+    int ch;
+    while ((ch = fgetc(file)) != EOF) {
+        if (ch == 0) {
+            if (!cap || n >= cap) return -1;
+            out[n] = '\0';
+            return 1;
+        }
+        if (n + 1 < cap) out[n] = (char)ch;
+        ++n;
+    }
+    if (ferror(file)) return -1;
+    return n == 0 ? 0 : -1;
+}
+
+static bool c_cache_cleanup_path_has_root(const char *path, const char *root) {
+    size_t n = strlen(root);
+    return !strncmp(path, root, n) && (path[n] == '\0' || path[n] == '/');
+}
+
+static bool c_cache_cleanup_retarget_asset_manifest(const char *cache,
+                                                     const C_CacheCleanupEntry *old,
+                                                     const C_CacheCleanupEntry *now) {
+    if (!old || !old->name[0]) return true;
+    char manifest[PATH_MAX];
+    if (!c_cache_cleanup_asset_manifest(cache, old->name, manifest)) return false;
+
+    struct stat st;
+    if (lstat(manifest, &st) != 0) return errno == ENOENT;
+    if (!S_ISREG(st.st_mode)) return false;
+
+    if (!now) return unlink(manifest) == 0 || errno == ENOENT;
+
+    char old_root[PATH_MAX], new_root[PATH_MAX];
+    if (!c_cache_cleanup_source_path(cache, old, old_root) ||
+        !c_cache_cleanup_source_path(cache, now, new_root)) return false;
+    if (!strcmp(old_root, new_root)) return true;
+
+    FILE *in = fopen(manifest, "rb");
+    if (!in) return false;
+    char temp[PATH_MAX];
+    if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", manifest, (long)getpid()) >= (int)sizeof(temp)) {
+        fclose(in);
+        return false;
+    }
+    FILE *out = fopen(temp, "wb");
+    if (!out) { fclose(in); return false; }
+
+    bool ok = true;
+    char logical[PATH_MAX], physical[PATH_MAX], rewritten[PATH_MAX];
+    for (;;) {
+        int left = c_cache_cleanup_read0(in, logical, sizeof(logical));
+        if (left == 0) break;
+        if (left < 0) { ok = false; break; }
+        int right = c_cache_cleanup_read0(in, physical, sizeof(physical));
+        if (right <= 0) { ok = false; break; }
+
+        const char *published = physical;
+        if (c_cache_cleanup_path_has_root(physical, old_root)) {
+            const char *suffix = physical + strlen(old_root);
+            int n = snprintf(rewritten, sizeof(rewritten), "%s%s", new_root, suffix);
+            if (n < 0 || n >= (int)sizeof(rewritten)) { ok = false; break; }
+            struct stat target;
+            if (stat(rewritten, &target) != 0 || !S_ISREG(target.st_mode)) { ok = false; break; }
+            published = rewritten;
+        }
+
+        size_t logical_len = strlen(logical) + 1;
+        size_t physical_len = strlen(published) + 1;
+        if (fwrite(logical, 1, logical_len, out) != logical_len ||
+            fwrite(published, 1, physical_len, out) != physical_len) {
+            ok = false;
+            break;
+        }
+    }
+    if (ferror(in)) ok = false;
+    if (fclose(in) != 0) ok = false;
+    if (ok && fflush(out) != 0) ok = false;
+    if (ok && fsync(fileno(out)) != 0) ok = false;
+    if (fclose(out) != 0) ok = false;
+    if (!ok) { (void)unlink(temp); return false; }
+    if (rename(temp, manifest) != 0) { (void)unlink(temp); return false; }
+    return true;
+}
+
 static void c_cache_cleanup_prune_after_update(void) {
     C_CacheCleanupLock after;
     c_cache_cleanup_load_lock(&after);
@@ -259,6 +368,7 @@ static void c_cache_cleanup_prune_after_update(void) {
         const C_CacheCleanupEntry *now = c_cache_cleanup_find_name(&after, name);
         bool changed = c_cache_cleanup_entry_changed(old, now);
 
+        if (changed && !c_cache_cleanup_retarget_asset_manifest(cache, old, now)) return;
         if (c_cache_cleanup_prune_prefix(cache, "src", name, &after, true) < 0) return;
         if (changed) {
             if (c_cache_cleanup_prune_prefix(cache, "pkg", name, &after, false) < 0) return;

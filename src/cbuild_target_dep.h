@@ -92,52 +92,199 @@ static void compiler_asset_normalize_path(char path[PATH_MAX]) {
     for (char *p = path; *p; ++p) if (*p == '\\') *p = '/';
 }
 
-static void compiler_stage_dependency_assets(const C_Dependency *d, const DepState *state) {
+static bool compiler_asset_files_equal(const char *a, const char *b) {
+    FILE *fa = fopen(a, "rb");
+    if (!fa) return false;
+    FILE *fb = fopen(b, "rb");
+    if (!fb) { fclose(fa); return false; }
+    unsigned char ba[8192], bb[8192];
+    bool equal = true;
+    for (;;) {
+        size_t na = fread(ba, 1, sizeof(ba), fa);
+        size_t nb = fread(bb, 1, sizeof(bb), fb);
+        if (na != nb || (na && memcmp(ba, bb, na))) { equal = false; break; }
+        if (!na) { if (ferror(fa) || ferror(fb)) equal = false; break; }
+    }
+    fclose(fa);
+    fclose(fb);
+    return equal;
+}
+
+static void compiler_asset_publish_temp(const char *temp, const char *final) {
+    if (compiler_asset_files_equal(temp, final)) {
+        if (unlink(temp) != 0) die("cannot remove temporary asset cache file %s: %s", temp, strerror(errno));
+        return;
+    }
+    if (rename(temp, final) != 0) {
+        int saved = errno;
+        unlink(temp);
+        errno = saved;
+        die("cannot publish asset cache file %s: %s", final, strerror(errno));
+    }
+}
+
+static void compiler_asset_project_cache(char out[PATH_MAX]) {
+    char cache[PATH_MAX], assets[PATH_MAX], cwd[PATH_MAX], key[17];
+    if (!getcwd(cwd, sizeof(cwd))) die("cannot determine project directory for dependency assets");
+    cache_root(cache);
+    path_join(assets, cache, "assets");
+    hash_hex(cwd, key);
+    path_join(out, assets, key);
+    mkdir_p(out);
+}
+
+static void compiler_asset_manifest_path(const char *project_cache, const char *dependency, char out[PATH_MAX]) {
+    char key[17], name[32];
+    hash_hex(dependency, key);
+    if (snprintf(name, sizeof(name), "%s.bin", key) >= (int)sizeof(name))
+        die("asset manifest name too long for %s", dependency);
+    path_join(out, project_cache, name);
+}
+
+static void compiler_asset_write_c_string(FILE *file, const char *value) {
+    fputc('"', file);
+    for (const unsigned char *p = (const unsigned char *)value; *p; ++p) {
+        if (*p == '\\' || *p == '"') fputc('\\', file);
+        if (*p == '\n') fputs("\\n", file);
+        else if (*p == '\r') fputs("\\r", file);
+        else if (*p == '\t') fputs("\\t", file);
+        else fputc(*p, file);
+    }
+    fputc('"', file);
+}
+
+static void compiler_asset_runtime_header(const char *project_cache, char include_dir[PATH_MAX]) {
+    char header[PATH_MAX], temp[PATH_MAX], root[PATH_MAX];
+    path_join(include_dir, project_cache, "include");
+    mkdir_p(include_dir);
+    path_join(header, include_dir, "casset.h");
+    if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", header, (long)getpid()) >= (int)sizeof(temp))
+        die("asset runtime header path too long");
+
+    c__copy(root, sizeof(root), project_cache);
+    compiler_asset_normalize_path(root);
+
+    FILE *file = fopen(temp, "wb");
+    if (!file) die("cannot create asset runtime header %s: %s", temp, strerror(errno));
+    fputs(
+        "#ifndef C_ASSET_RUNTIME_H\n"
+        "#define C_ASSET_RUNTIME_H\n"
+        "#include <stddef.h>\n"
+        "#include <stdint.h>\n"
+        "#include <stdio.h>\n"
+        "#include <string.h>\n"
+        "#ifndef C_ASSET_PATH_MAX\n"
+        "#define C_ASSET_PATH_MAX 4096\n"
+        "#endif\n"
+        "#if defined(__cplusplus)\n"
+        "#define C_ASSET_THREAD_LOCAL thread_local\n"
+        "#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L\n"
+        "#define C_ASSET_THREAD_LOCAL _Thread_local\n"
+        "#else\n"
+        "#define C_ASSET_THREAD_LOCAL\n"
+        "#endif\n"
+        "#define C_ASSET_MANIFEST_ROOT ", file);
+    compiler_asset_write_c_string(file, root);
+    fputs(
+        "\n"
+        "static inline uint64_t c_asset__hash(const char *text) {\n"
+        "    uint64_t h = 1469598103934665603ULL;\n"
+        "    const unsigned char *p = (const unsigned char *)text;\n"
+        "    while (*p) { h ^= *p++; h *= 1099511628211ULL; }\n"
+        "    return h;\n"
+        "}\n"
+        "static inline int c_asset__read0(FILE *file, char *out, size_t cap) {\n"
+        "    size_t n = 0; int ch;\n"
+        "    while ((ch = fgetc(file)) != EOF) {\n"
+        "        if (ch == 0) { if (cap) out[n < cap ? n : cap - 1] = '\\0'; return n < cap ? 1 : -1; }\n"
+        "        if (n + 1 < cap) out[n] = (char)ch;\n"
+        "        ++n;\n"
+        "    }\n"
+        "    return 0;\n"
+        "}\n"
+        "static inline const char *c_asset(const char *dependency, const char *logical_path) {\n"
+        "    if (!dependency || !logical_path) return NULL;\n"
+        "    C_ASSET_THREAD_LOCAL static char physical[C_ASSET_PATH_MAX];\n"
+        "    char manifest[C_ASSET_PATH_MAX], logical[C_ASSET_PATH_MAX];\n"
+        "    int n = snprintf(manifest, sizeof(manifest), \"%s/%016llx.bin\", C_ASSET_MANIFEST_ROOT,\n"
+        "                     (unsigned long long)c_asset__hash(dependency));\n"
+        "    if (n < 0 || n >= (int)sizeof(manifest)) return NULL;\n"
+        "    FILE *file = fopen(manifest, \"rb\");\n"
+        "    if (!file) return NULL;\n"
+        "    for (;;) {\n"
+        "        int left = c_asset__read0(file, logical, sizeof(logical));\n"
+        "        if (left <= 0) break;\n"
+        "        int right = c_asset__read0(file, physical, sizeof(physical));\n"
+        "        if (right <= 0) break;\n"
+        "        if (!strcmp(logical, logical_path)) { fclose(file); return physical; }\n"
+        "    }\n"
+        "    fclose(file);\n"
+        "    return NULL;\n"
+        "}\n"
+        "#undef C_ASSET_MANIFEST_ROOT\n"
+        "#undef C_ASSET_THREAD_LOCAL\n"
+        "#endif\n", file);
+    bool ok = fflush(file) == 0 && fsync(fileno(file)) == 0;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) { unlink(temp); die("cannot finish asset runtime header %s", temp); }
+    compiler_asset_publish_temp(temp, header);
+}
+
+static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *state) {
     if (!d->links.count) return;
     if (d->links.count % 2 != 0) die("dependency %s has an invalid asset mapping", d->name);
 
-    char root[PATH_MAX];
+    char project_cache[PATH_MAX], include_dir[PATH_MAX], manifest[PATH_MAX], temp[PATH_MAX], root[PATH_MAX];
+    compiler_asset_project_cache(project_cache);
+    compiler_asset_runtime_header(project_cache, include_dir);
+    compiler_asset_manifest_path(project_cache, d->name, manifest);
+    if (snprintf(temp, sizeof(temp), "%s.tmp.%ld", manifest, (long)getpid()) >= (int)sizeof(temp))
+        die("asset manifest path too long for %s", d->name);
     compiler_cbuild_project_root(d, state, root);
 
+    FILE *file = fopen(temp, "wb");
+    if (!file) die("cannot create asset manifest for %s: %s", d->name, strerror(errno));
     for (size_t i = 0; i < d->links.count; i += 2) {
-        char relative_source[PATH_MAX], source[PATH_MAX], destination[PATH_MAX];
+        char relative_source[PATH_MAX], logical[PATH_MAX], physical[PATH_MAX];
         c__copy(relative_source, sizeof(relative_source), d->links.items[i]);
-        c__copy(destination, sizeof(destination), d->links.items[i + 1]);
+        c__copy(logical, sizeof(logical), d->links.items[i + 1]);
         compiler_asset_normalize_path(relative_source);
-        compiler_asset_normalize_path(destination);
-        path_join(source, root, relative_source);
+        compiler_asset_normalize_path(logical);
+        path_join(physical, root, relative_source);
+        compiler_asset_normalize_path(physical);
 
-        if (!file_exists(source) || is_dir(source))
+        if (!file_exists(physical) || is_dir(physical)) {
+            fclose(file);
+            unlink(temp);
             die("dependency asset not found for %s: %s", d->name, relative_source);
-
-        uint64_t source_hash = hash_file_seed(1469598103934665603ULL, source);
-        if (file_exists(destination) && !is_dir(destination)) {
-            uint64_t destination_hash = hash_file_seed(1469598103934665603ULL, destination);
-            if (source_hash == destination_hash) continue;
         }
-
-        char parent[PATH_MAX];
-        c__copy(parent, sizeof(parent), destination);
-        char *slash = strrchr(parent, '/');
-        if (slash) {
-            *slash = '\0';
-            if (parent[0]) mkdir_p(parent);
+        if (strchr(logical, '\n') || strchr(logical, '\r') || strchr(logical, '\t')) {
+            fclose(file);
+            unlink(temp);
+            die("dependency asset logical path contains unsupported control characters for %s", d->name);
         }
-
-        note("ASSET", "%s -> %s", d->name, destination);
-        copy_file(source, destination);
-        if (!file_exists(destination) || is_dir(destination))
-            die("failed to stage dependency asset for %s: %s", d->name, destination);
-        uint64_t staged_hash = hash_file_seed(1469598103934665603ULL, destination);
-        if (source_hash != staged_hash)
-            die("staged dependency asset differs from source for %s: %s", d->name, destination);
+        if (fwrite(logical, 1, strlen(logical) + 1, file) != strlen(logical) + 1 ||
+            fwrite(physical, 1, strlen(physical) + 1, file) != strlen(physical) + 1) {
+            fclose(file);
+            unlink(temp);
+            die("cannot write asset manifest for %s", d->name);
+        }
     }
+    bool ok = fflush(file) == 0 && fsync(fileno(file)) == 0;
+    if (fclose(file) != 0) ok = false;
+    if (!ok) { unlink(temp); die("cannot finish asset manifest for %s", d->name); }
+    compiler_asset_publish_temp(temp, manifest);
+
+    /* Adding an absolute generated include must not replace the dependency's
+       normal root include when no explicit include directories were declared. */
+    if (!d->include_dirs.count) c__push(&d->include_dirs, ".");
+    if (!compiler_cbuild_list_contains(&d->include_dirs, include_dir)) c__push(&d->include_dirs, include_dir);
 }
 
 static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Options *opt,
                                                LockFile *lock, DepState *state, bool build_artifacts) {
     resolve_dependency(d, opt, lock, state, build_artifacts);
-    compiler_stage_dependency_assets(d, state);
+    compiler_publish_dependency_assets((C_Dependency *)d, state);
     if (d->kind != C_DEP_CBUILD) return;
 
     C_Dependency *mutable_dependency = (C_Dependency *)d;
