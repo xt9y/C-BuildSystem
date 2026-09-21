@@ -46,6 +46,7 @@ static void verify_surface(void) {
     void (*p_dep_sources)(C_Dependency *, const char *) = c_dep_sources;
     void (*p_dep_subdir)(C_Dependency *, const char *) = c_dep_subdir;
     void (*p_dep_flag)(C_Dependency *, const char *) = c_dep_flag;
+    void (*p_dep_asset)(C_Dependency *, const char *, const char *) = c_dep_asset;
     void (*p_use)(C_Target *, C_Dependency *) = c_use;
 
     C_TargetKind target_kinds[] = {
@@ -62,7 +63,7 @@ static void verify_surface(void) {
     (void)p_unity; (void)p_unity_auto; (void)p_no_unity; (void)p_standard;
     (void)p_warnings_strict; (void)p_generate; (void)p_link_target; (void)p_git;
     (void)p_dep_header_only; (void)p_dep_source; (void)p_dep_cbuild; (void)p_dep_include;
-    (void)p_dep_sources; (void)p_dep_subdir; (void)p_dep_flag; (void)p_use;
+    (void)p_dep_sources; (void)p_dep_subdir; (void)p_dep_flag; (void)p_dep_asset; (void)p_use;
     (void)target_kinds; (void)dep_kinds; (void)standards;
 }
 
