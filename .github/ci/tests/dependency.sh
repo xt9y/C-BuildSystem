@@ -117,6 +117,9 @@ new="$(grep resolved c.lock)"
 # The mirror is keyed by URL, so updating a ref on the same URL must reuse it.
 [ -d "$old_mirror" ]
 [ -f "$old_mirror.c-ready" ]
+# An already-built binary must follow the new cached revision immediately;
+# update must retarget the cache manifest before pruning the old checkout.
+./build/debug/app | grep -q '^42 font-v2$'
 "$C_BIN" run | grep -q '^42 font-v2$'
 [ ! -e Font ]
 
