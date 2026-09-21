@@ -71,6 +71,13 @@ git --git-dir="$mirror_cache" rev-parse --verify 'HEAD^{commit}' >/dev/null
 
 "$C_BIN" run | grep -q '^42$'
 old="$(grep resolved c.lock)"
+old_src="$src_cache"
+old_mirror="$mirror_cache"
+
+# Stale dependency build/package entries from older revisions must also be
+# reclaimed by update, while unrelated dependency cache entries survive.
+mkdir -p "$C_CACHE_DIR/pkg/answer-stale" "$C_CACHE_DIR/dep-build/answer-stale"
+mkdir -p "$C_CACHE_DIR/pkg/other-keep" "$C_CACHE_DIR/dep-build/other-keep"
 
 cd "$ROOT/headerdep"
 cat > answer.h <<'HDR'
@@ -84,9 +91,34 @@ cd "$ROOT/app"
 "$C_BIN" update answer
 new="$(grep resolved c.lock)"
 [ "$old" != "$new" ]
+[ ! -e "$old_src" ]
+[ ! -e "$old_src.c-ready" ]
+[ ! -e "$C_CACHE_DIR/pkg/answer-stale" ]
+[ ! -e "$C_CACHE_DIR/dep-build/answer-stale" ]
+[ -d "$C_CACHE_DIR/pkg/other-keep" ]
+[ -d "$C_CACHE_DIR/dep-build/other-keep" ]
+# The mirror is keyed by URL, so updating a ref on the same URL must reuse it.
+[ -d "$old_mirror" ]
+[ -f "$old_mirror.c-ready" ]
 "$C_BIN" run >/dev/null
 [ "$(cat Font/font.png)" = "font-v2" ]
+
+# If a dependency changes URL, the old mirror is no longer useful to this
+# project and must be reclaimed after the successful update.
+cp -R "$ROOT/headerdep" "$ROOT/headerdep2"
+git_url2="$ROOT/headerdep2"
+sed "s|$git_url|$git_url2|" build.c > build.c.new
+mv build.c.new build.c
+"$C_BIN" update answer
+[ ! -e "$old_mirror" ]
+[ ! -e "$old_mirror.c-ready" ]
+new_mirror="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*.git' | head -n 1)"
+[ -n "$new_mirror" ]
+[ -d "$new_mirror" ]
+
 [ "$($C_BIN cache)" = "$ROOT/cache" ]
-"$C_BIN" cache clean >/dev/null
-[ ! -d "$ROOT/cache" ]
+mkdir -p "$C_CACHE_DIR/unrelated"
+printf 'remove-me\n' > "$C_CACHE_DIR/unrelated/data"
+"$C_BIN" cclean >/dev/null
+[ ! -e "$ROOT/cache" ]
 echo "dependency: ok"
