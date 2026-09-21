@@ -44,8 +44,17 @@ typedef struct C_CacheCleanupLock {
 static bool c_cache_cleanup_update_active = false;
 static pid_t c_cache_cleanup_root_pid = 0;
 static char c_cache_cleanup_wanted[C_CACHE_CLEANUP_NAME_MAX];
-static char c_cache_cleanup_status_path[PATH_MAX];
+static int c_cache_cleanup_status_fd = -1;
 static C_CacheCleanupLock c_cache_cleanup_before;
+
+static void c_cache_cleanup_copy(char *dst, size_t cap, const char *src) {
+    if (!cap) return;
+    if (!src) src = "";
+    size_t len = strlen(src);
+    if (len >= cap) len = cap - 1;
+    memcpy(dst, src, len);
+    dst[len] = '\0';
+}
 
 static void c_cache_cleanup_join(char out[PATH_MAX], const char *a, const char *b) {
     if (!a || !*a) snprintf(out, PATH_MAX, "%s", b ? b : "");
@@ -61,9 +70,9 @@ static const char *c_cache_cleanup_home(void) {
 
 static bool c_cache_cleanup_root(char out[PATH_MAX]) {
     const char *override = getenv("C_CACHE_DIR");
-    if (override && *override) {
+    if (override && *override)
         return snprintf(out, PATH_MAX, "%s", override) < PATH_MAX;
-    }
+
     const char *home = c_cache_cleanup_home();
     if (!home) return false;
 #ifdef __APPLE__
@@ -144,10 +153,10 @@ static void c_cache_cleanup_load_lock(C_CacheCleanupLock *lock) {
         if (sscanf(line, "%63[^=] = \"%2047[^\"]\"", key, value) != 2) continue;
         size_t key_len = strlen(key);
         while (key_len && (key[key_len - 1] == ' ' || key[key_len - 1] == '\t')) key[--key_len] = '\0';
-        if (!strcmp(key, "name")) snprintf(current.name, sizeof(current.name), "%s", value);
-        else if (!strcmp(key, "url")) snprintf(current.url, sizeof(current.url), "%s", value);
-        else if (!strcmp(key, "requested")) snprintf(current.requested, sizeof(current.requested), "%s", value);
-        else if (!strcmp(key, "resolved")) snprintf(current.resolved, sizeof(current.resolved), "%s", value);
+        if (!strcmp(key, "name")) c_cache_cleanup_copy(current.name, sizeof(current.name), value);
+        else if (!strcmp(key, "url")) c_cache_cleanup_copy(current.url, sizeof(current.url), value);
+        else if (!strcmp(key, "requested")) c_cache_cleanup_copy(current.requested, sizeof(current.requested), value);
+        else if (!strcmp(key, "resolved")) c_cache_cleanup_copy(current.resolved, sizeof(current.resolved), value);
     }
     if (in_dependency) c_cache_cleanup_lock_push(lock, &current);
     fclose(file);
@@ -199,9 +208,9 @@ static int c_cache_cleanup_prune_prefix(const char *cache, const char *subdir, c
     struct dirent *ent;
     while ((ent = readdir(dir))) {
         if (strncmp(ent->d_name, prefix, prefix_len)) continue;
-        struct stat st;
         char path[PATH_MAX];
         c_cache_cleanup_join(path, root, ent->d_name);
+        struct stat st;
         if (lstat(path, &st) != 0) continue;
         if (!S_ISDIR(st.st_mode) && !S_ISLNK(st.st_mode)) continue;
         if (preserve_current_source && c_cache_cleanup_current_source(after, name, ent->d_name)) continue;
@@ -223,7 +232,7 @@ static int c_cache_cleanup_prune_mirror(const char *cache, const char *url) {
     return c_cache_cleanup_remove_entry(path) == 0 ? 1 : -1;
 }
 
-static bool c_cache_cleanup_name_seen(const char names[][C_CACHE_CLEANUP_NAME_MAX], size_t count, const char *name) {
+static bool c_cache_cleanup_name_seen(char names[][C_CACHE_CLEANUP_NAME_MAX], size_t count, const char *name) {
     for (size_t i = 0; i < count; ++i) if (!strcmp(names[i], name)) return true;
     return false;
 }
@@ -241,7 +250,7 @@ static void c_cache_cleanup_prune_after_update(void) {
         if (c_cache_cleanup_wanted[0] && strcmp(old->name, c_cache_cleanup_wanted)) continue;
         if (c_cache_cleanup_name_seen(names, name_count, old->name)) continue;
         if (name_count < C_CACHE_CLEANUP_MAX_DEPS)
-            snprintf(names[name_count++], C_CACHE_CLEANUP_NAME_MAX, "%s", old->name);
+            c_cache_cleanup_copy(names[name_count++], C_CACHE_CLEANUP_NAME_MAX, old->name);
     }
 
     for (size_t i = 0; i < name_count; ++i) {
@@ -312,31 +321,42 @@ static bool c_cache_cleanup_args(C_CacheCleanupArgs *out) {
 #endif
 }
 
-static void c_cache_cleanup_status_write(int status) {
-    if (!c_cache_cleanup_update_active || !c_cache_cleanup_status_path[0]) return;
-    int fd = open(c_cache_cleanup_status_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+static void c_cache_cleanup_status_setup(void) {
+    char path[PATH_MAX];
+    const char *tmp = getenv("TMPDIR");
+    if (!tmp || !*tmp) tmp = "/tmp";
+    int n = snprintf(path, sizeof(path), "%s%sc-buildsystem-update-XXXXXX",
+                     tmp, tmp[strlen(tmp) - 1] == '/' ? "" : "/");
+    if (n < 0 || n >= (int)sizeof(path)) return;
+
+    int fd = mkstemp(path);
     if (fd < 0) return;
+    (void)unlink(path);
+    int flags = fcntl(fd, F_GETFD);
+    if (flags >= 0) (void)fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    c_cache_cleanup_status_fd = fd;
+}
+
+static void c_cache_cleanup_status_write(int status) {
+    if (!c_cache_cleanup_update_active || c_cache_cleanup_status_fd < 0) return;
     char value = status == 0 ? '0' : '1';
-    (void)write(fd, &value, 1);
-    close(fd);
+    if (ftruncate(c_cache_cleanup_status_fd, 0) != 0) return;
+    if (lseek(c_cache_cleanup_status_fd, 0, SEEK_SET) < 0) return;
+    ssize_t written = write(c_cache_cleanup_status_fd, &value, 1);
+    (void)written;
 }
 
 static bool c_cache_cleanup_status_success(void) {
-    int fd = open(c_cache_cleanup_status_path, O_RDONLY);
-    if (fd < 0) return false;
+    if (c_cache_cleanup_status_fd < 0) return false;
+    if (lseek(c_cache_cleanup_status_fd, 0, SEEK_SET) < 0) return false;
     char value = 0;
-    ssize_t got = read(fd, &value, 1);
-    close(fd);
+    ssize_t got = read(c_cache_cleanup_status_fd, &value, 1);
     return got == 1 && value == '0';
 }
 
-static void c_cache_cleanup_setup_status(void) {
-    const char *tmp = getenv("TMPDIR");
-    if (!tmp || !*tmp) tmp = "/tmp";
-    snprintf(c_cache_cleanup_status_path, sizeof(c_cache_cleanup_status_path),
-             "%s%s.c-buildsystem-update-%ld.status", tmp,
-             tmp[strlen(tmp) - 1] == '/' ? "" : "/", (long)c_cache_cleanup_root_pid);
-    (void)unlink(c_cache_cleanup_status_path);
+static void c_cache_cleanup_status_close(void) {
+    if (c_cache_cleanup_status_fd >= 0) close(c_cache_cleanup_status_fd);
+    c_cache_cleanup_status_fd = -1;
 }
 
 static bool c_cache_cleanup_standalone_update(const C_CacheCleanupArgs *args) {
@@ -350,7 +370,7 @@ static bool c_cache_cleanup_standalone_update(const C_CacheCleanupArgs *args) {
             !strcmp(arg, "-v") || !strcmp(arg, "--verbose")) continue;
         if (arg[0] == '-') continue;
         if (c_cache_cleanup_wanted[0]) return false;
-        snprintf(c_cache_cleanup_wanted, sizeof(c_cache_cleanup_wanted), "%s", arg);
+        c_cache_cleanup_copy(c_cache_cleanup_wanted, sizeof(c_cache_cleanup_wanted), arg);
     }
     return true;
 }
@@ -382,18 +402,18 @@ static void c_cache_cleanup_start(void) {
     c_cache_cleanup_update_active = true;
     c_cache_cleanup_root_pid = getpid();
     c_cache_cleanup_load_lock(&c_cache_cleanup_before);
-    c_cache_cleanup_setup_status();
+    c_cache_cleanup_status_setup();
 }
 
 __attribute__((destructor))
 static void c_cache_cleanup_finish(void) {
     if (!c_cache_cleanup_update_active || getpid() != c_cache_cleanup_root_pid) return;
     bool success = c_cache_cleanup_status_success();
-    (void)unlink(c_cache_cleanup_status_path);
+    c_cache_cleanup_status_close();
     if (success) c_cache_cleanup_prune_after_update();
 }
 
-static _Noreturn void c_cache_cleanup_exit(int status) {
+static _Noreturn void __attribute__((unused)) c_cache_cleanup_exit(int status) {
     c_cache_cleanup_status_write(status);
     exit(status);
 }
