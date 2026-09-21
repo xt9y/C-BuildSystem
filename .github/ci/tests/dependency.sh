@@ -15,7 +15,8 @@ git config user.email test@example.invalid
 cat > answer.h <<'HDR'
 #define ANSWER 42
 HDR
-git add answer.h
+printf 'font-v1\n' > font.png
+git add answer.h font.png
 git commit -qm initial
 
 git_url="$ROOT/headerdep"
@@ -28,6 +29,7 @@ void build(C_Build *b) {
     c_sources(app, "src/*.c");
     C_Dependency *dep = c_git(b, "answer", "$git_url", "master");
     c_dep_header_only(dep);
+    c_dep_asset(dep, "font.png", "Font/font.png");
     c_use(app, dep);
 }
 EOF2
@@ -56,6 +58,7 @@ printf '#define ANSWER 0\n' > "$src_cache/answer.h"
 "$C_BIN" run | grep -q '^42$'
 [ -f "$src_cache.c-ready" ]
 grep -q 'ANSWER 42' "$src_cache/answer.h"
+[ "$(cat Font/font.png)" = "font-v1" ]
 
 # A failed `git clone --mirror` has the same failure mode. A malformed mirror
 # directory must be discarded and cloned again on the next invocation.
@@ -74,13 +77,15 @@ cat > answer.h <<'HDR'
 #define ANSWER 42
 #define SECOND 1
 HDR
-git add answer.h
+printf 'font-v2\n' > font.png
+git add answer.h font.png
 git commit -qm second
 cd "$ROOT/app"
 "$C_BIN" update answer
 new="$(grep resolved c.lock)"
 [ "$old" != "$new" ]
 "$C_BIN" run >/dev/null
+[ "$(cat Font/font.png)" = "font-v2" ]
 [ "$($C_BIN cache)" = "$ROOT/cache" ]
 "$C_BIN" cache clean >/dev/null
 [ ! -d "$ROOT/cache" ]
