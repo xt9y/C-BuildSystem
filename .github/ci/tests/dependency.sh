@@ -37,6 +37,7 @@ cat > src/main.c <<'SRC'
 #include <stdio.h>
 #include <string.h>
 #include <answer.h>
+#include <casset.h>
 
 int main(void) {
     const char *asset = c_asset("answer", "Font/font.png");
