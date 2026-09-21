@@ -40,6 +40,54 @@ static void compiler_cbuild_artifact_path(const C_Dependency *d, const DepState 
     path_join(out, profile_dir, name);
 }
 
+static bool compiler_cbuild_list_contains(const C_StringList *list, const char *value) {
+    if (!list || !value) return false;
+    for (size_t i = 0; i < list->count; ++i)
+        if (!strcmp(list->items[i], value)) return true;
+    return false;
+}
+
+static C_Target *compiler_cbuild_find_target(C_Build *build, const char *name) {
+    if (!build || !name) return NULL;
+    for (size_t i = 0; i < build->target_count; ++i)
+        if (!strcmp(build->targets[i].name, name)) return &build->targets[i];
+    return NULL;
+}
+
+static void compiler_cbuild_import_target_includes(C_Dependency *d, const DepState *state, const Options *opt) {
+    char root[PATH_MAX], previous_cwd[PATH_MAX];
+    compiler_cbuild_project_root(d, state, root);
+    if (!getcwd(previous_cwd, sizeof(previous_cwd))) die("getcwd failed while importing usage for %s", d->name);
+    if (chdir(root) != 0) die("cannot enter cbuild dependency %s: %s", d->name, strerror(errno));
+
+    C_Build *child = alloc_build();
+    load_build(opt, child);
+    C_Target *target = compiler_cbuild_find_target(child, d->build_target);
+    if (!target) die("cbuild dependency %s does not define target %s", d->name, d->build_target);
+    if (target->kind != d->build_target_kind)
+        die("cbuild dependency %s target %s has an unexpected target kind", d->name, d->build_target);
+
+    for (size_t i = 0; i < target->includes.count; ++i) {
+        const char *include = target->includes.items[i];
+        if (!compiler_cbuild_list_contains(&d->include_dirs, include)) c__push(&d->include_dirs, include);
+    }
+
+    free_build(child);
+    if (chdir(previous_cwd) != 0) die("cannot restore working directory after importing usage for %s", d->name);
+}
+
+static bool compiler_cbuild_absolute_path(const char *path) {
+    if (!path || !path[0]) return false;
+    if (path[0] == '/') return true;
+    return ((path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')) &&
+           path[1] == ':' && (path[2] == '/' || path[2] == '\\');
+}
+
+static void compiler_cbuild_path_join(char out[PATH_MAX], const char *a, const char *b) {
+    if (compiler_cbuild_absolute_path(b)) c__copy(out, PATH_MAX, b);
+    else path_join(out, a, b);
+}
+
 static void compiler_asset_normalize_path(char path[PATH_MAX]) {
     for (char *p = path; *p; ++p) if (*p == '\\') *p = '/';
 }
@@ -91,6 +139,9 @@ static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Opti
     resolve_dependency(d, opt, lock, state, build_artifacts);
     compiler_stage_dependency_assets(d, state);
     if (d->kind != C_DEP_CBUILD) return;
+
+    C_Dependency *mutable_dependency = (C_Dependency *)d;
+    compiler_cbuild_import_target_includes(mutable_dependency, state, opt);
 
     char root[PATH_MAX], artifact[PATH_MAX], executable[PATH_MAX];
     compiler_cbuild_project_root(d, state, root);
@@ -159,5 +210,6 @@ static void compiler_cbuild_append_link_flags(StrVec *a, const C_Target *t, C_Bu
 /* Affect only the compiler pipeline that appears after perf_v2.h in cli.c. */
 #define resolve_dependency compiler_cbuild_resolve_dependency
 #define append_link_flags compiler_cbuild_append_link_flags
+#define path_join compiler_cbuild_path_join
 
 #endif
