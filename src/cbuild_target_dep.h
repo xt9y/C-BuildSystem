@@ -40,9 +40,56 @@ static void compiler_cbuild_artifact_path(const C_Dependency *d, const DepState 
     path_join(out, profile_dir, name);
 }
 
+static void compiler_asset_normalize_path(char path[PATH_MAX]) {
+    for (char *p = path; *p; ++p) if (*p == '\\') *p = '/';
+}
+
+static void compiler_stage_dependency_assets(const C_Dependency *d, const DepState *state) {
+    if (!d->links.count) return;
+    if (d->links.count % 2 != 0) die("dependency %s has an invalid asset mapping", d->name);
+
+    char root[PATH_MAX];
+    compiler_cbuild_project_root(d, state, root);
+
+    for (size_t i = 0; i < d->links.count; i += 2) {
+        char relative_source[PATH_MAX], source[PATH_MAX], destination[PATH_MAX];
+        c__copy(relative_source, sizeof(relative_source), d->links.items[i]);
+        c__copy(destination, sizeof(destination), d->links.items[i + 1]);
+        compiler_asset_normalize_path(relative_source);
+        compiler_asset_normalize_path(destination);
+        path_join(source, root, relative_source);
+
+        if (!file_exists(source) || is_dir(source))
+            die("dependency asset not found for %s: %s", d->name, relative_source);
+
+        uint64_t source_hash = hash_file_seed(1469598103934665603ULL, source);
+        if (file_exists(destination) && !is_dir(destination)) {
+            uint64_t destination_hash = hash_file_seed(1469598103934665603ULL, destination);
+            if (source_hash == destination_hash) continue;
+        }
+
+        char parent[PATH_MAX];
+        c__copy(parent, sizeof(parent), destination);
+        char *slash = strrchr(parent, '/');
+        if (slash) {
+            *slash = '\0';
+            if (parent[0]) mkdir_p(parent);
+        }
+
+        note("ASSET", "%s -> %s", d->name, destination);
+        copy_file(source, destination);
+        if (!file_exists(destination) || is_dir(destination))
+            die("failed to stage dependency asset for %s: %s", d->name, destination);
+        uint64_t staged_hash = hash_file_seed(1469598103934665603ULL, destination);
+        if (source_hash != staged_hash)
+            die("staged dependency asset differs from source for %s: %s", d->name, destination);
+    }
+}
+
 static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Options *opt,
                                                LockFile *lock, DepState *state, bool build_artifacts) {
     resolve_dependency(d, opt, lock, state, build_artifacts);
+    compiler_stage_dependency_assets(d, state);
     if (d->kind != C_DEP_CBUILD) return;
 
     char root[PATH_MAX], artifact[PATH_MAX], executable[PATH_MAX];
