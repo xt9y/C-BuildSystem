@@ -13,13 +13,16 @@ mkdir -p "$LIB/include" "$LIB/src" "$APP/src"
 cat >"$LIB/include/value.h" <<'SRC'
 #ifndef VALUE_H
 #define VALUE_H
+#ifndef DEP_PUBLIC_VALUE
+#error "dependency public define was not propagated"
+#endif
 int dependency_value(void);
 #endif
 SRC
 
 cat >"$LIB/src/value.c" <<'SRC'
 #include "value.h"
-int dependency_value(void) { return 42; }
+int dependency_value(void) { return DEP_PUBLIC_VALUE; }
 SRC
 
 cat >"$LIB/build.c" <<'SRC'
@@ -28,6 +31,7 @@ void build(C_Build *b) {
     C_Target *lib = c_shared_library(b, "dependency");
     c_sources(lib, "src/value.c");
     c_include(lib, "include");
+    c_define(lib, "DEP_PUBLIC_VALUE=42");
     c_default_target(b, lib);
 }
 SRC
@@ -47,7 +51,7 @@ cat >"$APP/src/main.c" <<'SRC'
 #include "value.h"
 int main(void) {
     printf("%d\n", dependency_value());
-    return 0;
+    return DEP_PUBLIC_VALUE == 42 ? 0 : 1;
 }
 SRC
 
@@ -59,7 +63,6 @@ void build(C_Build *b) {
 
     C_Dependency *dep = c_git(b, "dependency", "$LIB", "main");
     c_dep_cbuild(dep, "dependency", C_TARGET_SHARED_LIBRARY);
-    c_dep_include(dep, "include");
     c_use(app, dep);
 
     c_default_target(b, app);
