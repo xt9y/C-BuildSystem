@@ -67,7 +67,7 @@ typedef struct C_Dependency {
     char ref[C_MAX_NAME];
     char subdir[C_MAX_PATH];
     C_DepKind kind;
-    C_StringList links;          /* reserved for source compatibility */
+    C_StringList links;          /* internal paired source/destination storage for c_dep_asset */
     C_StringList include_dirs;
     C_StringList source_patterns;
     C_StringList compile_flags;
@@ -284,6 +284,13 @@ static inline void c_dep_include(C_Dependency *d, const char *path) { if (!d) c_
 static inline void c_dep_sources(C_Dependency *d, const char *pattern) { if (!d) c__fatal("c_dep_sources received a null dependency"); c__push(&d->source_patterns, pattern); }
 static inline void c_dep_subdir(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_subdir received a null dependency"); c__copy(d->subdir, sizeof(d->subdir), path); }
 static inline void c_dep_flag(C_Dependency *d, const char *flag) { if (!d) c__fatal("c_dep_flag received a null dependency"); c__push(&d->compile_flags, flag); }
+static inline void c_dep_asset(C_Dependency *d, const char *source, const char *destination) {
+    if (!d) c__fatal("c_dep_asset received a null dependency");
+    if (!source || !source[0]) c__fatal("c_dep_asset source is empty");
+    if (!destination || !destination[0]) c__fatal("c_dep_asset destination is empty");
+    c__push(&d->links, source);
+    c__push(&d->links, destination);
+}
 
 static inline void c_use(C_Target *t, C_Dependency *d) {
     if (!t || !d) c__fatal("c_use requires a target and dependency");
