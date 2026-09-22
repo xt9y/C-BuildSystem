@@ -364,7 +364,15 @@ static bool git_mirror_has_commit(const char *mirror, const char *resolved) {
 static int git_fetch_mirror(const char *mirror, const Options *opt) {
     StrVec fetch = {0};
     vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror);
-    vec_push(&fetch, "fetch"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
+    vec_push(&fetch, "fetch"); vec_push(&fetch, "--depth=1"); vec_push(&fetch, "--prune"); vec_push(&fetch, "origin");
+    int rc = run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
+    return rc;
+}
+
+static int git_fetch_locked_commit(const char *mirror, const char *resolved, const Options *opt) {
+    StrVec fetch = {0};
+    vec_push(&fetch, "git"); vec_push(&fetch, "--git-dir"); vec_push(&fetch, mirror);
+    vec_push(&fetch, "fetch"); vec_push(&fetch, "--depth=1"); vec_push(&fetch, "origin"); vec_push(&fetch, resolved);
     int rc = run_process(&fetch, opt->verbose, NULL); vec_free(&fetch);
     return rc;
 }
@@ -657,7 +665,7 @@ static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mi
     if (!is_real_dir(mirror)) {
         char temp[PATH_MAX]; make_private_temp_dir(mirror, temp);
         note("FETCH", "%s", d->name);
-        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, d->git); vec_push(&a, temp);
+        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, "--depth=1"); vec_push(&a, "--no-single-branch"); vec_push(&a, "--no-local"); vec_push(&a, d->git); vec_push(&a, temp);
         int rc = run_process(&a, opt->verbose, NULL); vec_free(&a);
         if (rc != 0 || !git_mirror_valid(temp)) {
             (void)remove_tree(temp);
@@ -703,7 +711,7 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
     snprintf(state->resolved, sizeof(state->resolved), "%s", e->resolved);
     if (!git_mirror_has_commit(mirror, e->resolved)) {
         note("RECOVER", "%s mirror objects", d->name);
-        if (git_fetch_mirror(mirror, opt) != 0 || !git_mirror_has_commit(mirror, e->resolved))
+        if (git_fetch_locked_commit(mirror, e->resolved, opt) != 0 || !git_mirror_has_commit(mirror, e->resolved))
             die("cached mirror for %s does not contain locked commit %s", d->name, e->resolved);
     }
 
