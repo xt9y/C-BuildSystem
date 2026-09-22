@@ -62,6 +62,8 @@ mirror_cache="$(find "$C_CACHE_DIR/git" -mindepth 1 -maxdepth 1 -type d -name '*
 [ -n "$mirror_cache" ]
 [ -f "$src_cache.c-ready" ]
 [ -f "$mirror_cache.c-ready" ]
+[ "$(git --git-dir="$mirror_cache" rev-parse --is-shallow-repository)" = "true" ]
+[ "$(git --git-dir="$mirror_cache" rev-list --all --count)" -eq 1 ]
 [ ! -e Font ]
 
 # A failed checkout used to leave this directory behind and permanently poison
@@ -84,10 +86,12 @@ printf 'not-a-git-repository\n' > "$mirror_cache/HEAD"
 "$C_BIN" fetch >/dev/null
 [ -f "$mirror_cache.c-ready" ]
 git --git-dir="$mirror_cache" rev-parse --verify 'HEAD^{commit}' >/dev/null
+[ "$(git --git-dir="$mirror_cache" rev-parse --is-shallow-repository)" = "true" ]
 
 "$C_BIN" run | grep -q '^42 font-v1$'
 [ ! -e Font ]
 old="$(grep resolved c.lock)"
+locked_sha="$(sed -n 's/^resolved = "\(.*\)"/\1/p' c.lock)"
 old_src="$src_cache"
 old_mirror="$mirror_cache"
 
@@ -105,6 +109,16 @@ printf 'font-v2\n' > font.png
 git add answer.h font.png
 git commit -qm second
 cd "$ROOT/app"
+
+# A cold depth-1 mirror now contains only the new upstream tip, while c.lock
+# still points at the first commit. The locked commit must be fetched directly
+# without unshallowing the dependency mirror.
+rm -rf "$old_mirror" "$old_mirror.c-ready"
+"$C_BIN" run | grep -q '^42 font-v1$'
+[ -f "$old_mirror.c-ready" ]
+[ "$(git --git-dir="$old_mirror" rev-parse --is-shallow-repository)" = "true" ]
+git --git-dir="$old_mirror" cat-file -e "$locked_sha^{commit}"
+
 "$C_BIN" update answer
 new="$(grep resolved c.lock)"
 [ "$old" != "$new" ]
@@ -117,6 +131,7 @@ new="$(grep resolved c.lock)"
 # The mirror is keyed by URL, so updating a ref on the same URL must reuse it.
 [ -d "$old_mirror" ]
 [ -f "$old_mirror.c-ready" ]
+[ "$(git --git-dir="$old_mirror" rev-parse --is-shallow-repository)" = "true" ]
 # An already-built binary must follow the new cached revision immediately;
 # update must retarget the cache manifest before pruning the old checkout.
 ./build/debug/app | grep -q '^42 font-v2$'
@@ -138,6 +153,7 @@ current_src="$(find "$C_CACHE_DIR/src" -mindepth 1 -maxdepth 1 -type d -name 'an
 [ -d "$new_mirror" ]
 [ -n "$current_src" ]
 [ -d "$current_src" ]
+[ "$(git --git-dir="$new_mirror" rev-parse --is-shallow-repository)" = "true" ]
 "$C_BIN" run | grep -q '^42 font-v2$'
 [ ! -e Font ]
 
