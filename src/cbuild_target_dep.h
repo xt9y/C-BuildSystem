@@ -9,6 +9,8 @@
  * a second dependency pipeline.
  */
 
+#define COMPILER_DEP_CMAKE ((C_DepKind)1)
+
 static void compiler_cbuild_artifact_name(char out[C_MAX_NAME + 32], const char *name, C_TargetKind kind) {
     if (kind == C_TARGET_STATIC_LIBRARY) {
         snprintf(out, C_MAX_NAME + 32, "%s.a", name);
@@ -283,7 +285,8 @@ static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *
 
 static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Options *opt,
                                                LockFile *lock, DepState *state, bool build_artifacts) {
-    resolve_dependency(d, opt, lock, state, build_artifacts);
+    const bool cmake_dependency = d->kind == COMPILER_DEP_CMAKE;
+    resolve_dependency(d, opt, lock, state, build_artifacts || cmake_dependency);
     compiler_publish_dependency_assets((C_Dependency *)d, state);
     if (d->kind != C_DEP_CBUILD) return;
 
@@ -325,14 +328,49 @@ static void compiler_cbuild_resolve_dependency(const C_Dependency *d, const Opti
     c__copy(state->resolved, sizeof(state->resolved), resolved);
 }
 
+static void compiler_cmake_append_library_dir(StrVec *a, const char *dir) {
+    if (!is_dir(dir)) return;
+    char flag[PATH_MAX + 32];
+    int n = snprintf(flag, sizeof(flag), "-L%s", dir);
+    if (n < 0 || n >= (int)sizeof(flag)) die("CMake dependency library path too long");
+    vec_push(a, flag);
+    n = snprintf(flag, sizeof(flag), "-Wl,-rpath,%s", dir);
+    if (n < 0 || n >= (int)sizeof(flag)) die("CMake dependency rpath too long");
+    vec_push(a, flag);
+}
+
+static void compiler_cmake_append_link_flags(StrVec *a, const C_Dependency *d,
+                                             const DepState *state) {
+    char lib[PATH_MAX], lib64[PATH_MAX], root[PATH_MAX], bin[PATH_MAX];
+    path_join(lib, state->package, "lib");
+    path_join(lib64, state->package, "lib64");
+    compiler_cbuild_project_root(d, state, root);
+    path_join(bin, root, "_Bin");
+
+    compiler_cmake_append_library_dir(a, lib);
+    compiler_cmake_append_library_dir(a, lib64);
+    compiler_cmake_append_library_dir(a, bin);
+
+    for (size_t i = 0; i < d->source_patterns.count; ++i) {
+        char flag[C_MAX_NAME + 3];
+        int n = snprintf(flag, sizeof(flag), "-l%s", d->source_patterns.items[i]);
+        if (n < 0 || n >= (int)sizeof(flag)) die("CMake dependency library name too long for %s", d->name);
+        vec_push(a, flag);
+    }
+}
+
 static void compiler_cbuild_append_link_flags(StrVec *a, const C_Target *t, C_Build *b, DepState states[]) {
     for (size_t i = 0; i < t->dep_count; ++i) {
         C_Dependency *d = t->deps[i];
-        if (d->kind != C_DEP_CBUILD) continue;
-
         ptrdiff_t dep_index = d - b->deps;
         if (dep_index < 0 || (size_t)dep_index >= b->dep_count)
             die("target %s has invalid dependency", t->name);
+
+        if (d->kind == COMPILER_DEP_CMAKE) {
+            compiler_cmake_append_link_flags(a, d, &states[dep_index]);
+            continue;
+        }
+        if (d->kind != C_DEP_CBUILD) continue;
 
         const char *artifact = states[dep_index].package;
         if (!artifact[0] || !file_exists(artifact))
@@ -351,12 +389,27 @@ static void compiler_cbuild_append_link_flags(StrVec *a, const C_Target *t, C_Bu
         }
     }
 
-    append_link_flags(a, t, b, states);
+    for (size_t i = 0; i < t->system_links.count; ++i) {
+        char flag[C_MAX_NAME + 3];
+        snprintf(flag, sizeof(flag), "-l%s", t->system_links.items[i]);
+        vec_push(a, flag);
+    }
+#ifdef __APPLE__
+    for (size_t i = 0; i < t->frameworks.count; ++i) {
+        vec_push(a, "-framework");
+        vec_push(a, t->frameworks.items[i]);
+    }
+#endif
+    for (size_t i = 0; i < t->ldflags.count; ++i) vec_push(a, t->ldflags.items[i]);
 }
 
 /* Affect only the compiler pipeline that appears after perf_v2.h in cli.c. */
 #define resolve_dependency compiler_cbuild_resolve_dependency
 #define append_link_flags compiler_cbuild_append_link_flags
 #define path_join compiler_cbuild_path_join
+
+/* The public 1.x reserved slot is now the CMake dependency kind. The legacy
+ * rejection in cli.c appears after this header, so hide only that sentinel. */
+#define C_DEP_RESERVED ((C_DepKind)-1)
 
 #endif

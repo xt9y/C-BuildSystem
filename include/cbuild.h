@@ -48,6 +48,9 @@ typedef enum C_DepKind {
     C_DEP_CBUILD = 3
 } C_DepKind;
 
+/* CMake dependencies occupy the 1.x reserved dependency slot. */
+#define C_DEP_CMAKE C_DEP_RESERVED
+
 typedef enum C_Standard {
     C_STANDARD_C99 = 99,
     C_STANDARD_C11 = 11,
@@ -271,6 +274,19 @@ static inline C_Dependency *c_git(C_Build *b, const char *name, const char *git,
 
 static inline void c_dep_header_only(C_Dependency *d) { if (!d) c__fatal("c_dep_header_only received a null dependency"); d->kind = C_DEP_HEADER_ONLY; }
 static inline void c_dep_source(C_Dependency *d) { if (!d) c__fatal("c_dep_source received a null dependency"); d->kind = C_DEP_SOURCE; }
+static inline void c_dep_cmake(C_Dependency *d) { if (!d) c__fatal("c_dep_cmake received a null dependency"); d->kind = C_DEP_CMAKE; }
+static inline void c_dep_cmake_option(C_Dependency *d, const char *option) {
+    if (!d) c__fatal("c_dep_cmake_option received a null dependency");
+    if (d->kind != C_DEP_CMAKE) c__fatal("c_dep_cmake_option requires a CMake dependency");
+    if (!option || !option[0]) c__fatal("c_dep_cmake_option option is empty");
+    c__push(&d->compile_flags, option);
+}
+static inline void c_dep_link(C_Dependency *d, const char *library) {
+    if (!d) c__fatal("c_dep_link received a null dependency");
+    if (d->kind != C_DEP_CMAKE) c__fatal("c_dep_link requires a CMake dependency");
+    c__require_name(library, "dependency library");
+    c__push(&d->source_patterns, library);
+}
 static inline void c_dep_cbuild(C_Dependency *d, const char *target, C_TargetKind kind) {
     if (!d) c__fatal("c_dep_cbuild received a null dependency");
     c__require_name(target, "dependency target");
