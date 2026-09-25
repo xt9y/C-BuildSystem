@@ -1,4 +1,4 @@
-name: SDL3 PowerShell validation
+name: SDL3 production validation
 
 on:
   push:
@@ -65,3 +65,33 @@ jobs:
           if ($env:LIBRARY_PATH -notlike "*$lib*") { throw 'SDL lib was not added to LIBRARY_PATH' }
           if ($env:CMAKE_PREFIX_PATH -notlike "*$prefix*") { throw 'SDL prefix was not added to CMAKE_PREFIX_PATH' }
           Write-Host 'SDL3 PowerShell polyglot smoke passed.'
+
+  shell:
+    name: Exact curl /sdl3 smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Execute production POSIX path
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$PWD/shim"
+          cat > "$PWD/shim/apt-get" <<'EOF'
+          #!/bin/sh
+          exit 0
+          EOF
+          cat > "$PWD/shim/pkg-config" <<'EOF'
+          #!/bin/sh
+          case "$1" in
+            --atleast-version=*) exit 0 ;;
+            --exists) exit 0 ;;
+            --modversion) printf '%s\n' 3.4.0 ;;
+            --variable=libdir) printf '%s\n' /usr/local/lib ;;
+            *) exit 0 ;;
+          esac
+          EOF
+          chmod +x "$PWD/shim/apt-get" "$PWD/shim/pkg-config"
+          export PATH="$PWD/shim:$PATH"
+          output="$(curl -fsSL https://xt9y.de/sdl3 | sh)"
+          printf '%s\n' "$output"
+          grep -q 'Dependencies ready.' <<<"$output"
