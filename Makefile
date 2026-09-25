@@ -4,9 +4,6 @@ CPPFLAGS ?=
 BUILD := build
 
 ifeq ($(OS),Windows_NT)
-ifeq ($(origin CC),default)
-CC := clang
-endif
 EXE := .exe
 TARGET := $(BUILD)/c$(EXE)
 NATIVE := $(BUILD)/c-native$(EXE)
