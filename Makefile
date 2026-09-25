@@ -35,7 +35,7 @@ uninstall:
 	powershell -NoProfile -ExecutionPolicy Bypass -Command "$$root=[IO.Path]::GetFullPath('$(PREFIX)'); $$bin=[IO.Path]::GetFullPath('$(BINDIR)'); Remove-Item -Force (Join-Path $$bin 'c.exe') -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force (Join-Path $$root 'libexec/c-buildsystem') -ErrorAction SilentlyContinue; Remove-Item -Force (Join-Path $$root 'include/cbuild.h') -ErrorAction SilentlyContinue; $$user=[Environment]::GetEnvironmentVariable('Path','User'); if($$user){$$kept=@($$user -split ';' | Where-Object { $$_ -and ([IO.Path]::GetFullPath($$_).TrimEnd('\\') -ne $$bin.TrimEnd('\\')) }); [Environment]::SetEnvironmentVariable('Path', ($$kept -join ';'), 'User')}"
 
 clean:
-	powershell -NoProfile -Command "Remove-Item -Recurse -Force '$(BUILD)' -ErrorAction SilentlyContinue"
+	powershell -NoProfile -Command "if (Test-Path '$(BUILD)') { Remove-Item -Recurse -Force '$(BUILD)' }; exit 0"
 
 test: all
 	powershell -NoProfile -ExecutionPolicy Bypass -File .github/ci/windows.ps1
