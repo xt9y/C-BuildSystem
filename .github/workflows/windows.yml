@@ -23,11 +23,11 @@ jobs:
           $content = Invoke-RestMethod -Uri $url
           Write-Host "Invoke-RestMethod returned: $($content.GetType().FullName)"
           $tokens = $null
-          $errors = $null
-          [System.Management.Automation.Language.Parser]::ParseInput([string]$content, [ref]$tokens, [ref]$errors) | Out-Null
-          foreach ($error in $errors) {
-            $e = $error.Extent
-            Write-Host "PARSE ERROR: $($error.Message)"
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput([string]$content, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          foreach ($parseError in $parseErrors) {
+            $e = $parseError.Extent
+            Write-Host "PARSE ERROR: $($parseError.Message)"
             Write-Host "LINE $($e.StartLineNumber), COLUMN $($e.StartColumnNumber): $($e.Text)"
           }
-          if ($errors.Count -ne 0) { throw "PowerShell parser found $($errors.Count) error(s)" }
+          if ($parseErrors.Count -ne 0) { throw "PowerShell parser found $($parseErrors.Count) error(s)" }
