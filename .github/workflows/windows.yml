@@ -1,10 +1,12 @@
-name: Windows Native
+name: Native Windows
 
 on:
   workflow_dispatch:
   push:
     branches:
+      - main
       - windows-native
+  pull_request:
 
 permissions:
   contents: read
@@ -29,3 +31,29 @@ jobs:
           $PSVersionTable.PSVersion
       - name: Native Windows smoke test
         run: .github/ci/windows.ps1
+
+  unix-regression:
+    name: ${{ matrix.name }} regression
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux / GCC
+            runner: ubuntu-24.04
+            cc: gcc
+            cxx: g++
+          - name: macOS / Clang
+            runner: macos-15
+            cc: cc
+            cxx: c++
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build and test existing Unix backend
+        env:
+          CC: ${{ matrix.cc }}
+          CXX: ${{ matrix.cxx }}
+        run: |
+          make clean all
+          make test
