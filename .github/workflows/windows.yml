@@ -1,0 +1,31 @@
+name: Windows Native
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - windows-native
+
+permissions:
+  contents: read
+
+jobs:
+  windows:
+    name: Windows PowerShell / Clang
+    runs-on: windows-2025
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install GNU Make
+        run: choco install make --no-progress -y
+      - name: Toolchain
+        run: |
+          make --version | Select-Object -First 1
+          clang --version | Select-Object -First 1
+          llvm-ar --version | Select-Object -First 1
+          $PSVersionTable.PSVersion
+      - name: Native Windows smoke test
+        run: .github/ci/windows.ps1
