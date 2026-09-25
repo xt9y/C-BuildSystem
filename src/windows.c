@@ -124,10 +124,20 @@ static Options parse_options(int argc, char **argv) {
     if (o.jobs < 1) o.jobs = 1; if (o.jobs > 64) o.jobs = 64; return o;
 }
 
-int main(int argc, char **argv) {
-    const char *ar_env = getenv("AR");
-    if (!ar_env || !*ar_env) _putenv_s("AR", "ar");
+static bool is_command_token(const char *s) {
+    static const char *commands[] = {
+        "init", "build", "run", "watch", "fetch", "update", "deps", "test",
+        "clean", "cache", "doctor", "help", "--help", "-h", "version", "--version"
+    };
+    for (size_t i = 0; i < C_ARRAY_LEN(commands); ++i) if (!strcmp(s, commands[i])) return true;
+    return false;
+}
 
+static bool cache_clean_argument(int start, int i, char **argv) {
+    return i == start + 1 && !strcmp(argv[start], "cache") && !strcmp(argv[i], "clean");
+}
+
+static int run_segment(int argc, char **argv) {
     Options opt = parse_options(argc, argv);
     if (!strcmp(opt.command,"--version") || !strcmp(opt.command,"version")) { puts(C_VERSION); return 0; }
     if (!strcmp(opt.command,"help") || !strcmp(opt.command,"--help") || !strcmp(opt.command,"-h")) { usage(); return 0; }
@@ -147,4 +157,33 @@ int main(int argc, char **argv) {
     if (!strcmp(opt.command,"doctor")) return command_doctor(&opt);
     die("unknown command: %s (try `c help`)", opt.command);
     return 1;
+}
+
+int main(int argc, char **argv) {
+    const char *ar_env = getenv("AR");
+    if (!ar_env || !*ar_env) _putenv_s("AR", "ar");
+
+    if (argc < 2) return run_segment(argc, argv);
+
+    int start = 1;
+    while (start < argc) {
+        int end = argc;
+        for (int i = start + 1; i < argc; ++i) {
+            if (!strcmp(argv[i], "--")) break;
+            if (is_command_token(argv[i]) && !cache_clean_argument(start, i, argv)) { end = i; break; }
+        }
+
+        int seg_argc = 1 + (end - start);
+        char **seg_argv = calloc((size_t)seg_argc + 1, sizeof(*seg_argv));
+        if (!seg_argv) die("out of memory");
+        seg_argv[0] = argv[0];
+        for (int i = start; i < end; ++i) seg_argv[1 + i - start] = argv[i];
+
+        int rc = run_segment(seg_argc, seg_argv);
+        free(seg_argv);
+        if (rc != 0) return rc;
+        if (end >= argc) break;
+        start = end;
+    }
+    return 0;
 }
