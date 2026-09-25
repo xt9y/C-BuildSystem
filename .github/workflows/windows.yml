@@ -29,6 +29,13 @@ jobs:
           clang --version | Select-Object -First 1
           llvm-ar --version | Select-Object -First 1
           $PSVersionTable.PSVersion
+      - name: Default compiler contract
+        run: |
+          Remove-Item Env:CC -ErrorAction SilentlyContinue
+          $database = (& make -pn 2>$null) -join "`n"
+          if ($database -notmatch '(?m)^CC = cc$') {
+            throw 'Windows Makefile must honor GNU Make default CC=cc instead of forcing clang'
+          }
       - name: Native Windows smoke test
         run: .github/ci/windows.ps1
 
