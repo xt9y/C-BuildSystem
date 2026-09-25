@@ -21,13 +21,14 @@ jobs:
         shell: pwsh
     steps:
       - uses: actions/checkout@v5
-      - name: Install GNU Make
-        run: choco install make --no-progress -y
+      - name: Install GNU Make and MinGW
+        run: choco install make mingw --no-progress -y
       - name: Toolchain
         run: |
           make --version | Select-Object -First 1
           clang --version | Select-Object -First 1
           llvm-ar --version | Select-Object -First 1
+          gcc --version | Select-Object -First 1
           $PSVersionTable.PSVersion
       - name: Default compiler contract
         run: |
