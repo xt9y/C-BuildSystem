@@ -20,13 +20,12 @@ jobs:
       - name: Build and install all SDL dependencies from production endpoint
         run: |
           $prefix = Join-Path $PWD 'real-sdl'
-          $build = Join-Path $PWD 'sdl-build'
-          Remove-Item -Recurse -Force $prefix, $build -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force $prefix, (Join-Path $PWD 'sdl-build') -ErrorAction SilentlyContinue
 
           $env:PREFIX = $prefix
-          $env:BUILD = $build
-          $env:CC = (Get-Command 'cc' -CommandType Application -ErrorAction Stop).Source
-          $env:CXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop).Source
+          $env:BUILD = 'sdl-build'
+          $env:CC = (Get-Command 'cc' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+          $env:CXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
 
           Write-Host "CC=$env:CC"
           Write-Host "CXX=$env:CXX"
