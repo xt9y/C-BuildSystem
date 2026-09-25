@@ -1,3 +1,4 @@
+# Invoked by `make install` / `make uninstall`; not a separate installation UX.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $true)]
