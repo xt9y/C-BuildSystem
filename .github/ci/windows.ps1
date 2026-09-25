@@ -82,7 +82,10 @@ New-Item -ItemType Directory -Path $project | Out-Null
 Push-Location $project
 try {
     Invoke-Native 'c' @('init')
-    Invoke-Native 'c' @('build')
+
+    $chainedOutput = (& c build run 2>$null) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "c build run failed with exit code $LASTEXITCODE" }
+    if ($chainedOutput -notmatch 'Hello from C\.') { throw "unexpected c build run output: $chainedOutput" }
 
     $runOutput = (& c run 2>$null) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "c run failed with exit code $LASTEXITCODE" }
@@ -125,6 +128,82 @@ int main(void) { return 0; }
 
     Invoke-Native 'c' @('clean')
     if (Test-Path 'build') { throw 'c clean did not remove build/' }
+}
+finally {
+    Pop-Location
+}
+
+# CMake dependencies must use the same compiler family as the consuming target,
+# must not require install() rules, and must make their runtime DLL available to
+# an executable launched by `c run`.
+$depRepo = Join-Path $env:RUNNER_TEMP 'c-buildsystem-cmake-fixture-dep'
+Remove-Item -Recurse -Force $depRepo -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $depRepo | Out-Null
+
+@'
+cmake_minimum_required(VERSION 3.20)
+project(fixturedep C)
+add_library(fixturedep SHARED dep.c)
+'@ | Set-Content -NoNewline (Join-Path $depRepo 'CMakeLists.txt')
+
+@'
+#pragma once
+int fixture_value(void);
+'@ | Set-Content -NoNewline (Join-Path $depRepo 'dep.h')
+
+@'
+__declspec(dllexport) int fixture_value(void) { return 42; }
+'@ | Set-Content -NoNewline (Join-Path $depRepo 'dep.c')
+
+Push-Location $depRepo
+try {
+    Invoke-Native 'git' @('init', '-b', 'main')
+    Invoke-Native 'git' @('config', 'user.email', 'ci@example.invalid')
+    Invoke-Native 'git' @('config', 'user.name', 'C-BuildSystem CI')
+    Invoke-Native 'git' @('add', '.')
+    Invoke-Native 'git' @('commit', '-m', 'fixture')
+}
+finally {
+    Pop-Location
+}
+
+$depUri = 'file:///' + (($depRepo -replace '\\', '/') -replace ' ', '%20')
+$cmakeProject = Join-Path $env:RUNNER_TEMP 'c buildsystem windows cmake dependency'
+Remove-Item -Recurse -Force $cmakeProject -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path (Join-Path $cmakeProject 'src') -Force | Out-Null
+
+@"
+#include <cbuild.h>
+
+void build(C_Build *b) {
+    C_Target *app = c_executable(b, "app");
+    c_sources(app, "src/main.c");
+
+    C_Dependency *dep = c_git(b, "fixturedep", "$depUri", "main");
+    c_dep_cmake(dep);
+    c_dep_include(dep, ".");
+    c_dep_link(dep, "fixturedep");
+    c_use(app, dep);
+}
+"@ | Set-Content -NoNewline (Join-Path $cmakeProject 'build.c')
+
+@'
+#include "dep.h"
+#include <stdio.h>
+
+int main(void) {
+    int value = fixture_value();
+    printf("fixture=%d\n", value);
+    return value == 42 ? 0 : 1;
+}
+'@ | Set-Content -NoNewline (Join-Path $cmakeProject 'src/main.c')
+
+Push-Location $cmakeProject
+try {
+    $cmakeRunOutput = (& c build run 2>&1) -join "`n"
+    if ($LASTEXITCODE -ne 0) { throw "CMake dependency build/run failed:`n$cmakeRunOutput" }
+    if ($cmakeRunOutput -notmatch 'fixture=42') { throw "unexpected CMake dependency output: $cmakeRunOutput" }
+    if (-not (Test-Path 'build/debug/fixturedep.dll')) { throw 'CMake dependency DLL was not copied beside the executable' }
 }
 finally {
     Pop-Location
