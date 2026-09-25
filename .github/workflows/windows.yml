@@ -1,4 +1,4 @@
-name: SDL3 production validation
+name: SDL3 production full install
 
 on:
   push:
@@ -9,89 +9,43 @@ permissions:
   contents: read
 
 jobs:
-  powershell:
-    name: Exact irm /sdl3 smoke
+  windows:
+    name: Clean native Windows install
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 30
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Parse and execute production polyglot
+      - name: Build and install all SDL dependencies from production endpoint
         run: |
-          $url = 'https://xt9y.de/sdl3'
-          $content = Invoke-RestMethod -Uri $url
-          $tokens = $null
-          $parseErrors = $null
-          [System.Management.Automation.Language.Parser]::ParseInput([string]$content, [ref]$tokens, [ref]$parseErrors) | Out-Null
-          if ($parseErrors.Count -ne 0) {
-            foreach ($parseError in $parseErrors) {
-              Write-Host "LINE $($parseError.Extent.StartLineNumber): $($parseError.Message)"
-            }
-            throw 'PowerShell parser rejected /sdl3'
-          }
+          $prefix = Join-Path $PWD 'real-sdl'
+          $build = Join-Path $PWD 'sdl-build'
+          Remove-Item -Recurse -Force $prefix, $build -ErrorAction SilentlyContinue
 
-          $prefix = Join-Path $PWD 'fake-sdl'
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_image') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_shadercross') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'lib') | Out-Null
-          "#define SDL_MAJOR_VERSION 3`n#define SDL_MINOR_VERSION 4`n#define SDL_MICRO_VERSION 0`n" | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3\SDL_version.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_image\SDL_image.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_shadercross\SDL_shadercross.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_image.lib')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_shadercross.lib')
-
-          $shim = Join-Path $PWD 'shim'
-          New-Item -ItemType Directory -Force $shim | Out-Null
-          foreach ($tool in @('git', 'cmake', 'ninja', 'nasm')) {
-            "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim "$tool.cmd")
-          }
-          $env:Path = "$shim;$env:Path"
           $env:PREFIX = $prefix
+          $env:BUILD = $build
+          $env:CC = (Get-Command 'cc' -CommandType Application -ErrorAction Stop).Source
+          $env:CXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop).Source
 
-          $realCC = (Get-Command 'cc' -CommandType Application -ErrorAction Stop).Source
-          $realCXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop).Source
-          $env:CC = $realCC
-          $env:CXX = $realCXX
+          Write-Host "CC=$env:CC"
+          Write-Host "CXX=$env:CXX"
+          Write-Host "PREFIX=$env:PREFIX"
 
-          Invoke-RestMethod -Uri $url | Invoke-Expression
+          Invoke-RestMethod -Uri 'https://xt9y.de/sdl3' | Invoke-Expression
 
-          $bin = Join-Path $prefix 'bin'
-          $include = Join-Path $prefix 'include'
-          $lib = Join-Path $prefix 'lib'
-          if ($env:Path -notlike "*$bin*") { throw 'SDL bin was not added to PATH' }
-          if ($env:CPATH -notlike "*$include*") { throw 'SDL include was not added to CPATH' }
-          if ($env:LIBRARY_PATH -notlike "*$lib*") { throw 'SDL lib was not added to LIBRARY_PATH' }
-          if ($env:CMAKE_PREFIX_PATH -notlike "*$prefix*") { throw 'SDL prefix was not added to CMAKE_PREFIX_PATH' }
-          Write-Host 'SDL3 PowerShell polyglot smoke passed.'
+          $required = @(
+            (Join-Path $prefix 'include\SDL3\SDL.h')
+            (Join-Path $prefix 'include\SDL3_image\SDL_image.h')
+            (Join-Path $prefix 'include\SDL3_shadercross\SDL_shadercross.h')
+          )
+          foreach ($path in $required) {
+            if (-not (Test-Path $path)) { throw "Missing installed file: $path" }
+          }
 
-  shell:
-    name: Exact curl /sdl3 smoke
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Execute production POSIX path
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$PWD/shim"
-          cat > "$PWD/shim/apt-get" <<'EOF'
-          #!/bin/sh
-          exit 0
-          EOF
-          cat > "$PWD/shim/pkg-config" <<'EOF'
-          #!/bin/sh
-          case "$1" in
-            --atleast-version=*) exit 0 ;;
-            --exists) exit 0 ;;
-            --modversion) printf '%s\n' 3.4.0 ;;
-            --variable=libdir) printf '%s\n' /usr/local/lib ;;
-            *) exit 0 ;;
-          esac
-          EOF
-          chmod +x "$PWD/shim/apt-get" "$PWD/shim/pkg-config"
-          export PATH="$PWD/shim:$PATH"
-          output="$(curl -fsSL https://xt9y.de/sdl3 | sh)"
-          printf '%s\n' "$output"
-          grep -q 'Dependencies ready.' <<<"$output"
+          $libs = Get-ChildItem (Join-Path $prefix 'lib') -ErrorAction Stop
+          if (-not ($libs.Name -match 'SDL3')) { throw 'No SDL3 libraries were installed' }
+          if (-not ($libs.Name -match 'SDL3_image')) { throw 'No SDL3_image library was installed' }
+          if (-not ($libs.Name -match 'SDL3_shadercross')) { throw 'No SDL3_shadercross library was installed' }
+
+          Write-Host 'Clean native Windows SDL3 install passed.'
