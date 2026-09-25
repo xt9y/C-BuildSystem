@@ -6,37 +6,43 @@
 #include "windows_platform.h"
 #include "windows_build.h"
 
+static DepState *new_dep_states(void) {
+    DepState *states = calloc(C_MAX_DEPS, sizeof(*states));
+    if (!states) die("out of memory");
+    return states;
+}
+
 static int command_build(const Options *opt, bool run) {
-    C_Build *b = load_build(opt); DepState states[C_MAX_DEPS] = {0}; prepare_dependencies(b, opt, states);
+    C_Build *b = load_build(opt); DepState *states = new_dep_states(); prepare_dependencies(b, opt, states);
     unsigned char mark[C_MAX_TARGETS] = {0}; char *outputs[C_MAX_TARGETS] = {0}; C_Target *t = select_target(b, opt); char *output = build_target_graph(b, t, states, opt, mark, outputs);
     int rc = 0;
     if (run) {
         if (t->kind != C_TARGET_EXECUTABLE && t->kind != C_TARGET_TEST) die("target %s is not executable", t->name);
         note("RUN", "%s", output); StrVec a = {0}; vec_push(&a, output); for (int i = 0; i < opt->run_argc; ++i) vec_push(&a, opt->run_argv[i]); rc = run_vec(&a, opt->verbose, NULL); vec_free(&a);
     }
-    free(output); free_outputs(b, outputs); free_build(b); return rc;
+    free(output); free_outputs(b, outputs); free(states); free_build(b); return rc;
 }
 
 static int command_test(const Options *opt) {
-    C_Build *b = load_build(opt); DepState states[C_MAX_DEPS] = {0}; prepare_dependencies(b, opt, states);
+    C_Build *b = load_build(opt); DepState *states = new_dep_states(); prepare_dependencies(b, opt, states);
     unsigned char mark[C_MAX_TARGETS] = {0}; char *outputs[C_MAX_TARGETS] = {0}; size_t tests = 0;
     for (size_t i = 0; i < b->target_count; ++i) {
         C_Target *t = &b->targets[i]; if (t->kind != C_TARGET_TEST || (opt->target && strcmp(opt->target, t->name))) continue;
         char *out = build_target_graph(b, t, states, opt, mark, outputs); note("TEST", "%s", t->name); char *argv[] = {out, NULL}; int rc = run_argv(argv, opt->verbose, NULL); free(out); if (rc) die("test failed: %s", t->name); ++tests;
     }
     if (!tests) die("no test targets defined; use c_test() in build.c");
-    note("PASS", "%zu test target%s", tests, tests == 1 ? "" : "s"); free_outputs(b, outputs); free_build(b); return 0;
+    note("PASS", "%zu test target%s", tests, tests == 1 ? "" : "s"); free_outputs(b, outputs); free(states); free_build(b); return 0;
 }
 
 static int command_fetch(const Options *opt) {
-    C_Build *b = load_build(opt); DepState states[C_MAX_DEPS] = {0}; resolve_all(b, opt, states); note("DONE", "%zu dependencies ready", b->dep_count); free_build(b); return 0;
+    C_Build *b = load_build(opt); DepState *states = new_dep_states(); resolve_all(b, opt, states); note("DONE", "%zu dependencies ready", b->dep_count); free(states); free_build(b); return 0;
 }
 
 static int command_update(const Options *opt) {
     C_Build *b = load_build(opt); LockFile lock; load_lock(&lock); size_t w = 0; bool found = false;
     for (size_t i = 0; i < lock.count; ++i) { if (!opt->target || !strcmp(lock.entries[i].name, opt->target)) { found = true; continue; } lock.entries[w++] = lock.entries[i]; }
     if (opt->target && !found) die("dependency not found in c.lock: %s", opt->target); lock.count = w; if (lock.count) save_lock(&lock); else DeleteFileA("c.lock");
-    DepState states[C_MAX_DEPS] = {0}; resolve_all(b, opt, states); note("UPDATE", "%s", opt->target ? opt->target : "all dependencies"); free_build(b); return 0;
+    DepState *states = new_dep_states(); resolve_all(b, opt, states); note("UPDATE", "%s", opt->target ? opt->target : "all dependencies"); free(states); free_build(b); return 0;
 }
 
 static int command_deps(const Options *opt) {
