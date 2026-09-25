@@ -130,19 +130,101 @@ static void build_source_dependency(C_Dependency *d, const Options *opt, DepStat
         }
         vec_free(&srcs);
     }
-    StrVec ar = {0}; const char *arcmd = getenv("AR"); if (!arcmd || !*arcmd) arcmd = "llvm-ar"; vec_push(&ar, arcmd); vec_push(&ar, "rcs"); vec_push(&ar, lib);
+    StrVec ar = {0}; const char *arcmd = getenv("AR"); if (!arcmd || !*arcmd) arcmd = "ar"; vec_push(&ar, arcmd); vec_push(&ar, "rcs"); vec_push(&ar, lib);
     for (size_t i = 0; i < objects.count; ++i) vec_push(&ar, objects.items[i]); note("AR", "%s", lib); if (run_vec(&ar, opt->verbose, NULL) != 0) die("dependency archive failed: %s", d->name);
     vec_free(&ar); vec_free(&objects);
 }
 
+static const char *cmake_cxx_compiler(const Options *opt, char out[PATH_MAX]) {
+    const char *env = getenv("CXX");
+    if (env && *env) return env;
+
+    char cc[PATH_MAX]; snprintf(cc, sizeof(cc), "%s", opt->cc); slashify(cc);
+    const char *base = path_basename(cc);
+    const char *candidate = NULL;
+    if (!_stricmp(base, "cc.exe") || !_stricmp(base, "cc")) candidate = "c++.exe";
+    else if (!_stricmp(base, "gcc.exe") || !_stricmp(base, "gcc")) candidate = "g++.exe";
+    else if (!_stricmp(base, "clang.exe") || !_stricmp(base, "clang")) candidate = "clang++.exe";
+
+    if (candidate && (strchr(cc, '/') || strchr(cc, '\\'))) {
+        char dir[PATH_MAX]; snprintf(dir, sizeof(dir), "%s", cc); path_dirname(dir); path_join(out, dir, candidate);
+        if (file_exists(out)) return out;
+    }
+    if (command_exists("c++")) return "c++";
+    if (command_exists("g++")) return "g++";
+    if (command_exists("clang++")) return "clang++";
+    return NULL;
+}
+
+static uint64_t cmake_dependency_signature(C_Dependency *d, const Options *opt, const char *cxx) {
+    uint64_t h = hash_string(opt->cc);
+    h = hash_update(h, &opt->release, sizeof(opt->release));
+    if (cxx) h = hash_update(h, cxx, strlen(cxx));
+    for (size_t i = 0; i < d->compile_flags.count; ++i) h = hash_update(h, d->compile_flags.items[i], strlen(d->compile_flags.items[i]));
+    return h;
+}
+
+static bool find_named_file_recursive(const char *root, const char *name, char out[PATH_MAX]) {
+    if (!is_dir(root)) return false;
+    char direct[PATH_MAX]; path_join(direct, root, name);
+    if (file_exists(direct)) { snprintf(out, PATH_MAX, "%s", direct); return true; }
+
+    char pattern[PATH_MAX]; path_join(pattern, root, "*");
+    WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    bool found = false;
+    do {
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+        if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, "..")) continue;
+        char child[PATH_MAX]; path_join(child, root, fd.cFileName);
+        if (find_named_file_recursive(child, name, out)) { found = true; break; }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    return found;
+}
+
+static bool find_cmake_link_artifact(const DepState *s, const char *name, char out[PATH_MAX]) {
+    char names[5][C_MAX_NAME + 32];
+    snprintf(names[0], sizeof(names[0]), "lib%s.dll.a", name);
+    snprintf(names[1], sizeof(names[1]), "lib%s.a", name);
+    snprintf(names[2], sizeof(names[2]), "%s.dll.a", name);
+    snprintf(names[3], sizeof(names[3]), "%s.a", name);
+    snprintf(names[4], sizeof(names[4]), "%s.lib", name);
+
+    char lib[PATH_MAX]; path_join(lib, s->package, "lib");
+    for (size_t i = 0; i < C_ARRAY_LEN(names); ++i) {
+        char p[PATH_MAX]; path_join(p, lib, names[i]);
+        if (file_exists(p)) { snprintf(out, PATH_MAX, "%s", p); return true; }
+    }
+    if (s->artifact[0]) for (size_t i = 0; i < C_ARRAY_LEN(names); ++i) if (find_named_file_recursive(s->artifact, names[i], out)) return true;
+    return false;
+}
+
 static void build_cmake_dependency(C_Dependency *d, const Options *opt, DepState *s) {
     if (d->kind != C_DEP_CMAKE) return;
-    char root[PATH_MAX]; dep_root(d, s, root); char stamp[PATH_MAX]; path_join(stamp, s->package, ".c-built");
+
+    char cxx_buf[PATH_MAX]; const char *cxx = cmake_cxx_compiler(opt, cxx_buf);
+    uint64_t sig = cmake_dependency_signature(d, opt, cxx); char key[17]; hash_hex(sig, key);
+    char buildname[64], stampname[64];
+    snprintf(buildname, sizeof(buildname), ".build-%s", key);
+    snprintf(stampname, sizeof(stampname), ".c-built-%s", key);
+
+    char root[PATH_MAX], builddir[PATH_MAX], stamp[PATH_MAX], libdir[PATH_MAX], bindir[PATH_MAX];
+    dep_root(d, s, root); path_join(builddir, s->package, buildname); path_join(stamp, s->package, stampname);
+    path_join(libdir, s->package, "lib"); path_join(bindir, s->package, "bin");
+    mkdir_p(builddir); mkdir_p(libdir); mkdir_p(bindir); snprintf(s->artifact, PATH_MAX, "%s", builddir);
+
     if (!file_exists(stamp)) {
-        char builddir[PATH_MAX]; path_join(builddir, s->package, ".build"); mkdir_p(builddir);
-        StrVec cm = {0}; vec_push(&cm, "cmake"); vec_push(&cm, "-S"); vec_push(&cm, root); vec_push(&cm, "-B"); vec_push(&cm, builddir);
+        StrVec cm = {0}; vec_push(&cm, "cmake"); vec_push(&cm, "-S"); vec_push(&cm, root); vec_push(&cm, "-B"); vec_push(&cm, builddir); vec_push(&cm, "-G"); vec_push(&cm, "Ninja");
         char type[64]; snprintf(type, sizeof(type), "-DCMAKE_BUILD_TYPE=%s", opt->release ? "Release" : "Debug"); vec_push(&cm, type);
-        char pref[PATH_MAX + 64]; snprintf(pref, sizeof(pref), "-DCMAKE_INSTALL_PREFIX=%s", s->package); vec_push(&cm, pref); vec_push(&cm, "-DBUILD_SHARED_LIBS=OFF");
+        char pref[PATH_MAX + 64], ccopt[PATH_MAX + 64], cxxopt[PATH_MAX + 64], archiveopt[PATH_MAX + 64], libopt[PATH_MAX + 64], runtimeopt[PATH_MAX + 64];
+        snprintf(pref, sizeof(pref), "-DCMAKE_INSTALL_PREFIX=%s", s->package); vec_push(&cm, pref);
+        snprintf(ccopt, sizeof(ccopt), "-DCMAKE_C_COMPILER=%s", opt->cc); vec_push(&cm, ccopt);
+        if (cxx) { snprintf(cxxopt, sizeof(cxxopt), "-DCMAKE_CXX_COMPILER=%s", cxx); vec_push(&cm, cxxopt); }
+        snprintf(archiveopt, sizeof(archiveopt), "-DCMAKE_ARCHIVE_OUTPUT_DIRECTORY=%s", libdir); vec_push(&cm, archiveopt);
+        snprintf(libopt, sizeof(libopt), "-DCMAKE_LIBRARY_OUTPUT_DIRECTORY=%s", libdir); vec_push(&cm, libopt);
+        snprintf(runtimeopt, sizeof(runtimeopt), "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=%s", bindir); vec_push(&cm, runtimeopt);
+        vec_push(&cm, "-DBUILD_SHARED_LIBS=OFF");
         for (size_t i = 0; i < d->compile_flags.count; ++i) vec_push(&cm, d->compile_flags.items[i]);
         note("DEP", "%s", d->name); if (run_vec(&cm, opt->verbose, NULL) != 0) die("cmake configure failed for %s", d->name); vec_free(&cm);
         char *build[] = {"cmake", "--build", builddir, "--config", opt->release ? "Release" : "Debug", NULL}; if (run_argv(build, opt->verbose, NULL) != 0) die("cmake build failed for %s", d->name);
@@ -175,12 +257,31 @@ static void append_link_flags(StrVec *a, C_Target *t, C_Build *b, DepState state
         DepState *s = &states[idx];
         if (d->kind == C_DEP_SOURCE || d->kind == C_DEP_CBUILD) { if (s->artifact[0]) vec_push(a, s->artifact); }
         else if (d->kind == C_DEP_CMAKE) {
-            char lib[PATH_MAX], flag[PATH_MAX + 3]; path_join(lib, s->package, "lib"); snprintf(flag, sizeof(flag), "-L%s", lib); vec_push(a, flag);
-            for (size_t j = 0; j < d->source_patterns.count; ++j) { char l[C_MAX_NAME + 3]; snprintf(l, sizeof(l), "-l%s", d->source_patterns.items[j]); vec_push(a, l); }
+            for (size_t j = 0; j < d->source_patterns.count; ++j) {
+                char artifact[PATH_MAX];
+                if (!find_cmake_link_artifact(s, d->source_patterns.items[j], artifact)) die("cmake dependency %s did not produce link library %s", d->name, d->source_patterns.items[j]);
+                vec_push(a, artifact);
+            }
         }
     }
     for (size_t i = 0; i < t->system_links.count; ++i) { char x[C_MAX_NAME + 3]; snprintf(x, sizeof(x), "-l%s", t->system_links.items[i]); vec_push(a, x); }
     for (size_t i = 0; i < t->ldflags.count; ++i) vec_push(a, t->ldflags.items[i]);
+}
+
+static void copy_cmake_runtime_dependencies(C_Target *t, C_Build *b, DepState states[], const char *output) {
+    char outdir[PATH_MAX]; snprintf(outdir, sizeof(outdir), "%s", output); path_dirname(outdir);
+    for (size_t i = 0; i < t->dep_count; ++i) {
+        C_Dependency *d = t->deps[i]; if (d->kind != C_DEP_CMAKE) continue;
+        ptrdiff_t idx = d - b->deps; if (idx < 0 || (size_t)idx >= b->dep_count) die("invalid dependency");
+        char bindir[PATH_MAX]; path_join(bindir, states[idx].package, "bin"); if (!is_dir(bindir)) continue;
+        char pattern[PATH_MAX]; path_join(pattern, bindir, "*.dll"); WIN32_FIND_DATAA fd; HANDLE h = FindFirstFileA(pattern, &fd); if (h == INVALID_HANDLE_VALUE) continue;
+        do {
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) continue;
+            char src[PATH_MAX], dst[PATH_MAX]; path_join(src, bindir, fd.cFileName); path_join(dst, outdir, fd.cFileName);
+            if (_stricmp(src, dst)) copy_file_or_die(src, dst);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
 }
 
 static C_Target *select_target(C_Build *b, const Options *opt) {
@@ -227,7 +328,7 @@ static char *build_one(C_Build *b, C_Target *t, DepState states[], const Options
     bool relink = !file_exists(output) || task_count > 0; uint64_t ot = file_mtime(output); for (size_t i = 0; i < objects.count; ++i) if (file_mtime(objects.items[i]) > ot) relink = true;
     if (relink) {
         if (t->kind == C_TARGET_STATIC_LIBRARY) {
-            StrVec a = {0}; const char *ar = getenv("AR"); if (!ar || !*ar) ar = "llvm-ar"; vec_push(&a, ar); vec_push(&a, "rcs"); vec_push(&a, output); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
+            StrVec a = {0}; const char *ar = getenv("AR"); if (!ar || !*ar) ar = "ar"; vec_push(&a, ar); vec_push(&a, "rcs"); vec_push(&a, output); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
             note("AR", "%s", output); if (run_vec(&a, opt->verbose, NULL) != 0) die("archive failed"); vec_free(&a);
         } else {
             StrVec a = {0}; vec_push(&a, opt->cc); if (t->kind == C_TARGET_SHARED_LIBRARY) vec_push(&a, "-shared"); for (size_t i = 0; i < objects.count; ++i) vec_push(&a, objects.items[i]);
@@ -235,6 +336,7 @@ static char *build_one(C_Build *b, C_Target *t, DepState states[], const Options
             append_link_flags(&a, t, b, states); vec_push(&a, "-o"); vec_push(&a, output); note("LINK", "%s", output); if (run_vec(&a, opt->verbose, NULL) != 0) die("link failed"); vec_free(&a);
         }
     } else note("CACHED", "%s", t->name);
+    if (t->kind == C_TARGET_EXECUTABLE || t->kind == C_TARGET_TEST || t->kind == C_TARGET_SHARED_LIBRARY) copy_cmake_runtime_dependencies(t, b, states, output);
     vec_free(&sources); vec_free(&objects); return output;
 }
 
