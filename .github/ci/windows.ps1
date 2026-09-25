@@ -7,8 +7,41 @@ function Invoke-Native([string]$File, [string[]]$Arguments) {
     }
 }
 
-$env:CC = 'clang'
-$env:AR = 'llvm-ar'
+# Regression guard: the Windows build must honor GNU Make's normal CC=cc
+# default instead of hard-coding clang, and the runtime build backend must use
+# plain ar instead of requiring llvm-ar. The shims below make cc/ar work while
+# deliberately making direct clang/llvm-ar calls fail.
+$realClang = (Get-Command clang.exe -ErrorAction Stop).Source
+$realLlvmAr = (Get-Command llvm-ar.exe -ErrorAction Stop).Source
+$toolShim = Join-Path $env:RUNNER_TEMP 'c-buildsystem-tool-shims'
+Remove-Item -Recurse -Force $toolShim -ErrorAction SilentlyContinue
+New-Item -ItemType Directory -Path $toolShim | Out-Null
+
+@"
+@echo off
+"$realClang" %*
+"@ | Set-Content -Encoding Ascii (Join-Path $toolShim 'cc.cmd')
+
+@"
+@echo off
+echo unexpected direct clang invocation 1>&2
+exit /b 97
+"@ | Set-Content -Encoding Ascii (Join-Path $toolShim 'clang.cmd')
+
+@"
+@echo off
+"$realLlvmAr" %*
+"@ | Set-Content -Encoding Ascii (Join-Path $toolShim 'ar.cmd')
+
+@"
+@echo off
+echo unexpected direct llvm-ar invocation 1>&2
+exit /b 98
+"@ | Set-Content -Encoding Ascii (Join-Path $toolShim 'llvm-ar.cmd')
+
+Remove-Item Env:CC -ErrorAction SilentlyContinue
+Remove-Item Env:AR -ErrorAction SilentlyContinue
+$env:Path = "$toolShim;$env:Path"
 
 Invoke-Native 'make' @('clean')
 Invoke-Native 'make' @()
