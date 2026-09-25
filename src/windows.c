@@ -77,7 +77,7 @@ static int command_clean(void) { remove_tree("build"); DeleteFileA("compile_comm
 static int command_doctor(const Options *opt) {
     printf("c %s\n\n", C_VERSION); printf("Platform   Windows %s\n", sizeof(void*) == 8 ? "x86_64" : "x86");
     printf("Compiler   %s%s\n", opt->cc, command_exists(opt->cc) ? "" : "  [missing]");
-    const char *ar = getenv("AR"); if (!ar || !*ar) ar = "llvm-ar"; printf("Archiver   %s%s\n", ar, command_exists(ar) ? "" : "  [missing]");
+    const char *ar = getenv("AR"); if (!ar || !*ar) ar = "ar"; printf("Archiver   %s%s\n", ar, command_exists(ar) ? "" : "  [missing]");
     printf("Git        %s\n", command_exists("git") ? "ok" : "missing"); printf("CPUs       %d\n", cpu_count()); printf("Jobs       %d\n", opt->jobs);
     char cache[PATH_MAX]; cache_root(cache); printf("Cache      %s\n", cache); return 0;
 }
@@ -87,7 +87,7 @@ static void usage(void) {
          "usage:\n"
          "  c init\n  c build [target] [--release] [-j N] [-v]\n  c run [target] [--release] [-j N] [-v] [-- args...]\n"
          "  c fetch\n  c update [dependency]\n  c deps [tree|clean]\n  c test [target]\n  c clean\n  c cache [clean]\n  c doctor\n  c --version\n\n"
-         "environment:\n  CC              C compiler (default: clang)\n  AR              archiver (default: llvm-ar)\n  C_CACHE_DIR     override global cache directory\n  C_INCLUDE_DIR   directory containing cbuild.h\n");
+         "environment:\n  CC              C compiler (default: cc)\n  AR              archiver (default: ar)\n  C_CACHE_DIR     override global cache directory\n  C_INCLUDE_DIR   directory containing cbuild.h\n");
 }
 
 static bool backend_file(const char *name) { return file_exists(name); }
@@ -108,7 +108,7 @@ static int wrapper_make(const Options *opt) {
 }
 
 static Options parse_options(int argc, char **argv) {
-    Options o = {0}; o.command = argc > 1 ? argv[1] : "help"; o.cc = getenv("CC"); if (!o.cc || !*o.cc) o.cc = "clang"; o.jobs = default_jobs();
+    Options o = {0}; o.command = argc > 1 ? argv[1] : "help"; o.cc = getenv("CC"); if (!o.cc || !*o.cc) o.cc = "cc"; o.jobs = default_jobs();
     for (int i = 2; i < argc; ++i) {
         if (!strcmp(argv[i], "--")) { o.run_argc = argc - i - 1; o.run_argv = &argv[i + 1]; break; }
         if (!strcmp(argv[i], "--release") || !strcmp(argv[i], "-Drelease")) o.release = true;
