@@ -203,7 +203,8 @@ try {
     $cmakeRunOutput = (& c build run 2>&1) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "CMake dependency build/run failed:`n$cmakeRunOutput" }
     if ($cmakeRunOutput -notmatch 'fixture=42') { throw "unexpected CMake dependency output: $cmakeRunOutput" }
-    if (-not (Test-Path 'build/debug/fixturedep.dll')) { throw 'CMake dependency DLL was not copied beside the executable' }
+    $runtimeDll = Get-ChildItem 'build/debug' -Filter '*fixturedep*.dll' -File -ErrorAction SilentlyContinue | Select-Object -First 1
+    if (-not $runtimeDll) { throw 'CMake dependency DLL was not copied beside the executable' }
 }
 finally {
     Pop-Location
