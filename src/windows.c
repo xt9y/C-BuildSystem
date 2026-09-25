@@ -1,3 +1,8 @@
+#define _CRT_SECURE_NO_WARNINGS
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#define LockFile CBuildLockFile
+
 #include "windows_platform.h"
 #include "windows_build.h"
 
