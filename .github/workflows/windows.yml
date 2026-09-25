@@ -42,6 +42,8 @@ jobs:
       - name: MinGW consumes native CMake DLL
         run: |
           $gcc = (Get-Command gcc.exe -ErrorAction Stop).Source
+          $c = Join-Path $env:LOCALAPPDATA 'Programs/C-BuildSystem/bin/c.exe'
+          if (-not (Test-Path $c)) { throw "installed c.exe not found: $c" }
           $depRepo = Join-Path $env:RUNNER_TEMP 'c-buildsystem-native-cmake-dep'
           $project = Join-Path $env:RUNNER_TEMP 'c-buildsystem-mingw-native-dep'
           Remove-Item -Recurse -Force $depRepo,$project -ErrorAction SilentlyContinue
@@ -108,7 +110,7 @@ jobs:
               $env:CC = $gcc
               Remove-Item Env:CXX -ErrorAction SilentlyContinue
               Push-Location $project
-              $output = (& c build run 2>&1) -join "`n"
+              $output = (& $c build run 2>&1) -join "`n"
               if ($LASTEXITCODE -ne 0) { throw "MinGW/native CMake dependency failed:`n$output" }
               if ($output -notmatch 'native=42') { throw "unexpected output:`n$output" }
               if (-not (Get-ChildItem build/debug -Filter '*nativeonly*.dll' -File -ErrorAction SilentlyContinue)) {
