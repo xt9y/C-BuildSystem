@@ -17,9 +17,9 @@ jobs:
       run:
         shell: pwsh
     steps:
-      - name: Parse and execute deployed polyglot
+      - name: Parse and execute production polyglot
         run: |
-          $url = 'https://xt9y-d23uqs6nd-xt9ys-projects.vercel.app/sdl3'
+          $url = 'https://xt9y.de/sdl3'
           $content = Invoke-RestMethod -Uri $url
           $tokens = $null
           $parseErrors = $null
@@ -54,8 +54,6 @@ jobs:
           $realCXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop).Source
           $env:CC = $realCC
           $env:CXX = $realCXX
-          Write-Host "CC=$env:CC"
-          Write-Host "CXX=$env:CXX"
 
           Invoke-RestMethod -Uri $url | Invoke-Expression
 
