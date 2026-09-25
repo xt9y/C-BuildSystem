@@ -10,50 +10,60 @@ permissions:
 
 jobs:
   powershell:
-    name: Reproduce compiler discovery
+    name: Exact irm /sdl3 smoke
     runs-on: windows-2025
-    timeout-minutes: 5
+    timeout-minutes: 10
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Reproduce helper exactly
+      - name: Parse and execute deployed polyglot
         run: |
+          $url = 'https://xt9y-d23uqs6nd-xt9ys-projects.vercel.app/sdl3'
+          $content = Invoke-RestMethod -Uri $url
+          $tokens = $null
+          $parseErrors = $null
+          [System.Management.Automation.Language.Parser]::ParseInput([string]$content, [ref]$tokens, [ref]$parseErrors) | Out-Null
+          if ($parseErrors.Count -ne 0) {
+            foreach ($parseError in $parseErrors) {
+              Write-Host "LINE $($parseError.Extent.StartLineNumber): $($parseError.Message)"
+            }
+            throw 'PowerShell parser rejected /sdl3'
+          }
+
+          $prefix = Join-Path $PWD 'fake-sdl'
+          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_image') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_shadercross') | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $prefix 'lib') | Out-Null
+          "#define SDL_MAJOR_VERSION 3`n#define SDL_MINOR_VERSION 4`n#define SDL_MICRO_VERSION 0`n" | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3\SDL_version.h')
+          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_image\SDL_image.h')
+          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_shadercross\SDL_shadercross.h')
+          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_image.lib')
+          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_shadercross.lib')
+
           $shim = Join-Path $PWD 'shim'
           New-Item -ItemType Directory -Force $shim | Out-Null
-          foreach ($tool in @('cc', 'c++')) {
+          foreach ($tool in @('git', 'cmake', 'ninja', 'nasm')) {
             "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim "$tool.cmd")
           }
           $env:Path = "$shim;$env:Path"
-          $env:CC = 'cc'
-          $env:CXX = 'c++'
+          $env:PREFIX = $prefix
 
-          function Find-FirstCommand-Buggy {
-              param([string[]]$Names)
-              foreach ($name in $Names) {
-                  Write-Host "buggy candidate='$name' Names='$Names'"
-                  if ([string]::IsNullOrWhiteSpace($name)) { continue }
-                  $cmd = Get-Command $name -ErrorAction SilentlyContinue
-                  if ($cmd) { return $cmd.Source }
-              }
-              return $null
-          }
+          $realCC = (Get-Command 'cc' -CommandType Application -ErrorAction Stop).Source
+          $realCXX = (Get-Command 'c++' -CommandType Application -ErrorAction Stop).Source
+          $env:CC = $realCC
+          $env:CXX = $realCXX
+          Write-Host "CC=$env:CC"
+          Write-Host "CXX=$env:CXX"
 
-          function Find-FirstCommand-Fixed {
-              param([string[]]$Candidates)
-              foreach ($candidate in $Candidates) {
-                  Write-Host "fixed candidate='$candidate'"
-                  if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
-                  $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
-                  if ($cmd) { return $cmd.Source }
-              }
-              return $null
-          }
+          Invoke-RestMethod -Uri $url | Invoke-Expression
 
-          $cxxCandidates = @($env:CXX, 'c++', 'clang++', 'g++')
-          $buggy = Find-FirstCommand-Buggy $cxxCandidates
-          $fixed = Find-FirstCommand-Fixed $cxxCandidates
-          Write-Host "buggy result='$buggy'"
-          Write-Host "fixed result='$fixed'"
-          if ($buggy) { throw "Expected buggy helper to fail, but it returned $buggy" }
-          if (-not $fixed) { throw 'Fixed helper still failed' }
+          $bin = Join-Path $prefix 'bin'
+          $include = Join-Path $prefix 'include'
+          $lib = Join-Path $prefix 'lib'
+          if ($env:Path -notlike "*$bin*") { throw 'SDL bin was not added to PATH' }
+          if ($env:CPATH -notlike "*$include*") { throw 'SDL include was not added to CPATH' }
+          if ($env:LIBRARY_PATH -notlike "*$lib*") { throw 'SDL lib was not added to LIBRARY_PATH' }
+          if ($env:CMAKE_PREFIX_PATH -notlike "*$prefix*") { throw 'SDL prefix was not added to CMAKE_PREFIX_PATH' }
+          Write-Host 'SDL3 PowerShell polyglot smoke passed.'
