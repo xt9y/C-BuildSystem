@@ -15,6 +15,7 @@ BINDIR ?= $(PREFIX)/bin
 INCLUDEDIR ?= $(PREFIX)/include
 LIBEXECDIR ?= $(PREFIX)/libexec/c-buildsystem
 WINDOWS_SOURCE := src/windows.c
+WINDOWS_INSTALL := src/windows_install.ps1
 
 .PHONY: all clean install uninstall test
 
@@ -28,11 +29,11 @@ $(NATIVE): $(WINDOWS_SOURCE) src/windows_platform.h src/windows_build.h include/
 	powershell -NoProfile -Command "New-Item -ItemType Directory -Force '$(BUILD)' | Out-Null"
 	$(CC) $(CPPFLAGS) $(CFLAGS) -Iinclude $(WINDOWS_SOURCE) -o $(NATIVE)
 
-install: all
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference='Stop'; $$root=[IO.Path]::GetFullPath('$(PREFIX)'); $$bin=[IO.Path]::GetFullPath('$(BINDIR)'); $$inc=[IO.Path]::GetFullPath('$(INCLUDEDIR)'); $$libexec=[IO.Path]::GetFullPath('$(LIBEXECDIR)'); New-Item -ItemType Directory -Force $$bin,$$inc,$$libexec | Out-Null; Copy-Item -Force '$(TARGET)' (Join-Path $$bin 'c.exe'); Copy-Item -Force '$(NATIVE)' (Join-Path $$libexec 'c-native.exe'); Copy-Item -Force 'include/cbuild.h' (Join-Path $$inc 'cbuild.h'); $$user=[Environment]::GetEnvironmentVariable('Path','User'); $$entries=@(); if($$user){$$entries=@($$user -split ';' | Where-Object { $$_ })}; $$normalized=@($$entries | ForEach-Object { try {[IO.Path]::GetFullPath($$_).TrimEnd('\\')} catch {$$_} }); if($$normalized -notcontains $$bin.TrimEnd('\\')) { [Environment]::SetEnvironmentVariable('Path', (($$entries + $$bin) -join ';'), 'User'); Write-Host 'Added' $$bin 'to the user PATH. Open a new PowerShell window to use c everywhere.' }; Write-Host 'Installed c to' (Join-Path $$bin 'c.exe')"
+install: all $(WINDOWS_INSTALL)
+	powershell -NoProfile -ExecutionPolicy Bypass -File $(WINDOWS_INSTALL) -Prefix "$(PREFIX)" -Target "$(TARGET)" -Native "$(NATIVE)" -Header "include/cbuild.h"
 
-uninstall:
-	powershell -NoProfile -ExecutionPolicy Bypass -Command "$$root=[IO.Path]::GetFullPath('$(PREFIX)'); $$bin=[IO.Path]::GetFullPath('$(BINDIR)'); Remove-Item -Force (Join-Path $$bin 'c.exe') -ErrorAction SilentlyContinue; Remove-Item -Recurse -Force (Join-Path $$root 'libexec/c-buildsystem') -ErrorAction SilentlyContinue; Remove-Item -Force (Join-Path $$root 'include/cbuild.h') -ErrorAction SilentlyContinue; $$user=[Environment]::GetEnvironmentVariable('Path','User'); if($$user){$$kept=@($$user -split ';' | Where-Object { $$_ -and ([IO.Path]::GetFullPath($$_).TrimEnd('\\') -ne $$bin.TrimEnd('\\')) }); [Environment]::SetEnvironmentVariable('Path', ($$kept -join ';'), 'User')}"
+uninstall: $(WINDOWS_INSTALL)
+	powershell -NoProfile -ExecutionPolicy Bypass -File $(WINDOWS_INSTALL) -Prefix "$(PREFIX)" -Uninstall
 
 clean:
 	powershell -NoProfile -Command "if (Test-Path '$(BUILD)') { Remove-Item -Recurse -Force '$(BUILD)' }; exit 0"
