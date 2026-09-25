@@ -10,62 +10,24 @@ permissions:
 
 jobs:
   powershell:
-    name: Exact irm /sdl3 smoke
+    name: Locate PowerShell parse error
     runs-on: windows-2025
-    timeout-minutes: 10
+    timeout-minutes: 5
     defaults:
       run:
         shell: pwsh
     steps:
-      - uses: actions/checkout@v5
-
-      - name: Parse and execute deployed polyglot
+      - name: Parse deployed polyglot with diagnostics
         run: |
           $url = 'https://xt9y-29bxyddmk-xt9ys-projects.vercel.app/sdl3'
           $content = Invoke-RestMethod -Uri $url
           Write-Host "Invoke-RestMethod returned: $($content.GetType().FullName)"
-
           $tokens = $null
           $errors = $null
           [System.Management.Automation.Language.Parser]::ParseInput([string]$content, [ref]$tokens, [ref]$errors) | Out-Null
-          if ($errors.Count -ne 0) {
-            $errors | ForEach-Object { Write-Error $_.Message }
-            throw 'PowerShell parser rejected /sdl3'
+          foreach ($error in $errors) {
+            $e = $error.Extent
+            Write-Host "PARSE ERROR: $($error.Message)"
+            Write-Host "LINE $($e.StartLineNumber), COLUMN $($e.StartColumnNumber): $($e.Text)"
           }
-
-          $prefix = Join-Path $PWD 'fake-sdl'
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_image') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'include\SDL3_shadercross') | Out-Null
-          New-Item -ItemType Directory -Force (Join-Path $prefix 'lib') | Out-Null
-
-          "#define SDL_MAJOR_VERSION 3`n#define SDL_MINOR_VERSION 4`n#define SDL_MICRO_VERSION 0`n" |
-            Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3\SDL_version.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_image\SDL_image.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'include\SDL3_shadercross\SDL_shadercross.h')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_image.lib')
-          '' | Set-Content -Encoding Ascii (Join-Path $prefix 'lib\SDL3_shadercross.lib')
-
-          $shim = Join-Path $PWD 'shim'
-          New-Item -ItemType Directory -Force $shim | Out-Null
-          foreach ($name in @('git', 'cmake', 'ninja', 'nasm', 'cc', 'c++')) {
-            "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim "$name.cmd")
-          }
-
-          $env:Path = "$shim;$env:Path"
-          $env:PREFIX = $prefix
-          $env:CC = 'cc'
-          $env:CXX = 'c++'
-
-          # Exercise the exact native Windows usage intended for users.
-          Invoke-RestMethod -Uri $url | Invoke-Expression
-
-          $bin = Join-Path $prefix 'bin'
-          $include = Join-Path $prefix 'include'
-          $lib = Join-Path $prefix 'lib'
-          if ($env:Path -notlike "*$bin*") { throw 'SDL bin was not added to PATH' }
-          if ($env:CPATH -notlike "*$include*") { throw 'SDL include was not added to CPATH' }
-          if ($env:LIBRARY_PATH -notlike "*$lib*") { throw 'SDL lib was not added to LIBRARY_PATH' }
-          if ($env:CMAKE_PREFIX_PATH -notlike "*$prefix*") { throw 'SDL prefix was not added to CMAKE_PREFIX_PATH' }
-
-          Write-Host 'SDL3 PowerShell polyglot smoke passed.'
+          if ($errors.Count -ne 0) { throw "PowerShell parser found $($errors.Count) error(s)" }
