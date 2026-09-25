@@ -125,6 +125,9 @@ static Options parse_options(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    const char *ar_env = getenv("AR");
+    if (!ar_env || !*ar_env) _putenv_s("AR", "ar");
+
     Options opt = parse_options(argc, argv);
     if (!strcmp(opt.command,"--version") || !strcmp(opt.command,"version")) { puts(C_VERSION); return 0; }
     if (!strcmp(opt.command,"help") || !strcmp(opt.command,"--help") || !strcmp(opt.command,"-h")) { usage(); return 0; }
