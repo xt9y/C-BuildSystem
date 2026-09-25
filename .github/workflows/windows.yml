@@ -10,31 +10,50 @@ permissions:
 
 jobs:
   powershell:
-    name: Diagnose CXX discovery
+    name: Reproduce compiler discovery
     runs-on: windows-2025
     timeout-minutes: 5
     defaults:
       run:
         shell: pwsh
     steps:
-      - name: Inspect c++ resolution
+      - name: Reproduce helper exactly
         run: |
           $shim = Join-Path $PWD 'shim'
           New-Item -ItemType Directory -Force $shim | Out-Null
-          "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim 'c++.cmd')
-          "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim 'g++.cmd')
+          foreach ($tool in @('cc', 'c++')) {
+            "@echo off`r`nexit /b 0`r`n" | Set-Content -Encoding Ascii (Join-Path $shim "$tool.cmd")
+          }
           $env:Path = "$shim;$env:Path"
+          $env:CC = 'cc'
+          $env:CXX = 'c++'
 
-          Write-Host "PATHEXT=$env:PATHEXT"
-          Write-Host 'Get-Command c++:'
-          Get-Command 'c++' -All -ErrorAction SilentlyContinue | Format-List Name,CommandType,Source,Path
-          Write-Host 'Get-Command c++.cmd:'
-          Get-Command 'c++.cmd' -All -ErrorAction SilentlyContinue | Format-List Name,CommandType,Source,Path
-          Write-Host 'Get-Command g++:'
-          Get-Command 'g++' -All -ErrorAction SilentlyContinue | Format-List Name,CommandType,Source,Path
-          Write-Host 'where.exe c++:'
-          & where.exe 'c++' 2>$null
-          Write-Host "where c++ exit=$LASTEXITCODE"
-          Write-Host 'where.exe g++:'
-          & where.exe 'g++' 2>$null
-          Write-Host "where g++ exit=$LASTEXITCODE"
+          function Find-FirstCommand-Buggy {
+              param([string[]]$Names)
+              foreach ($name in $Names) {
+                  Write-Host "buggy candidate='$name' Names='$Names'"
+                  if ([string]::IsNullOrWhiteSpace($name)) { continue }
+                  $cmd = Get-Command $name -ErrorAction SilentlyContinue
+                  if ($cmd) { return $cmd.Source }
+              }
+              return $null
+          }
+
+          function Find-FirstCommand-Fixed {
+              param([string[]]$Candidates)
+              foreach ($candidate in $Candidates) {
+                  Write-Host "fixed candidate='$candidate'"
+                  if ([string]::IsNullOrWhiteSpace($candidate)) { continue }
+                  $cmd = Get-Command $candidate -ErrorAction SilentlyContinue
+                  if ($cmd) { return $cmd.Source }
+              }
+              return $null
+          }
+
+          $cxxCandidates = @($env:CXX, 'c++', 'clang++', 'g++')
+          $buggy = Find-FirstCommand-Buggy $cxxCandidates
+          $fixed = Find-FirstCommand-Fixed $cxxCandidates
+          Write-Host "buggy result='$buggy'"
+          Write-Host "fixed result='$fixed'"
+          if ($buggy) { throw "Expected buggy helper to fail, but it returned $buggy" }
+          if (-not $fixed) { throw 'Fixed helper still failed' }
