@@ -39,6 +39,86 @@ jobs:
           }
       - name: Native Windows smoke test
         run: .github/ci/windows.ps1
+      - name: MinGW consumes native CMake DLL
+        run: |
+          $gcc = (Get-Command gcc.exe -ErrorAction Stop).Source
+          $depRepo = Join-Path $env:RUNNER_TEMP 'c-buildsystem-native-cmake-dep'
+          $project = Join-Path $env:RUNNER_TEMP 'c-buildsystem-mingw-native-dep'
+          Remove-Item -Recurse -Force $depRepo,$project -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $depRepo | Out-Null
+          New-Item -ItemType Directory -Path (Join-Path $project 'src') -Force | Out-Null
+
+          @'
+          cmake_minimum_required(VERSION 3.20)
+          project(nativeonly CXX)
+          if(NOT MSVC)
+            message(FATAL_ERROR "nativeonly intentionally requires the native MSVC toolchain")
+          endif()
+          add_library(nativeonly SHARED dep.cpp)
+          '@ | Set-Content -NoNewline (Join-Path $depRepo 'CMakeLists.txt')
+          @'
+          #pragma once
+          #ifdef __cplusplus
+          extern "C" {
+          #endif
+          int native_value(void);
+          #ifdef __cplusplus
+          }
+          #endif
+          '@ | Set-Content -NoNewline (Join-Path $depRepo 'dep.h')
+          @'
+          extern "C" __declspec(dllexport) int native_value(void) { return 42; }
+          '@ | Set-Content -NoNewline (Join-Path $depRepo 'dep.cpp')
+
+          Push-Location $depRepo
+          git init -b main
+          git config user.email ci@example.invalid
+          git config user.name C-BuildSystem-CI
+          git add .
+          git commit -m fixture
+          Pop-Location
+          if ($LASTEXITCODE -ne 0) { throw 'failed to create dependency fixture' }
+
+          $depUri = 'file:///' + (($depRepo -replace '\\', '/') -replace ' ', '%20')
+          @"
+          #include <cbuild.h>
+          void build(C_Build *b) {
+              C_Target *app = c_executable(b, "app");
+              c_sources(app, "src/main.c");
+              C_Dependency *dep = c_git(b, "nativeonly", "$depUri", "main");
+              c_dep_cmake(dep);
+              c_dep_include(dep, ".");
+              c_dep_link(dep, "nativeonly");
+              c_use(app, dep);
+          }
+          "@ | Set-Content -NoNewline (Join-Path $project 'build.c')
+          @'
+          #include "dep.h"
+          #include <stdio.h>
+          int main(void) {
+              int value = native_value();
+              printf("native=%d\n", value);
+              return value == 42 ? 0 : 1;
+          }
+          '@ | Set-Content -NoNewline (Join-Path $project 'src/main.c')
+
+          $oldCC = $env:CC
+          $oldCXX = $env:CXX
+          try {
+              $env:CC = $gcc
+              Remove-Item Env:CXX -ErrorAction SilentlyContinue
+              Push-Location $project
+              $output = (& c build run 2>&1) -join "`n"
+              if ($LASTEXITCODE -ne 0) { throw "MinGW/native CMake dependency failed:`n$output" }
+              if ($output -notmatch 'native=42') { throw "unexpected output:`n$output" }
+              if (-not (Get-ChildItem build/debug -Filter '*nativeonly*.dll' -File -ErrorAction SilentlyContinue)) {
+                  throw 'native dependency DLL was not copied beside the executable'
+              }
+              Pop-Location
+          } finally {
+              if ($oldCC) { $env:CC = $oldCC } else { Remove-Item Env:CC -ErrorAction SilentlyContinue }
+              if ($oldCXX) { $env:CXX = $oldCXX } else { Remove-Item Env:CXX -ErrorAction SilentlyContinue }
+          }
 
   unix-regression:
     name: ${{ matrix.name }} regression
