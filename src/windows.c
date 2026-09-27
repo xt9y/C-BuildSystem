@@ -12,9 +12,83 @@ static DepState *new_dep_states(void) {
     return states;
 }
 
+static void compile_db_escape(FILE *f, const char *s) {
+    for (; *s; ++s) {
+        unsigned char c = (unsigned char)*s;
+        if (c == '\\' || c == '"') fputc('\\', f);
+        if (c == '\n') fputs("\\n", f);
+        else if (c == '\r') fputs("\\r", f);
+        else if (c == '\t') fputs("\\t", f);
+        else if (c < 0x20) fprintf(f, "\\u%04x", c);
+        else fputc(c, f);
+    }
+}
+
+static void write_compile_command(FILE *db, bool *first, StrVec *cmd, const char *src, const char *cwd) {
+    if (!*first) fprintf(db, ",\n");
+    *first = false;
+    fprintf(db, "  {\"directory\":\""); compile_db_escape(db, cwd); fprintf(db, "\",\"file\":\""); compile_db_escape(db, src); fprintf(db, "\",\"arguments\":[");
+    for (size_t i = 0; i < cmd->count; ++i) { if (i) fputc(',', db); fputc('"', db); compile_db_escape(db, cmd->items[i]); fputc('"', db); }
+    fprintf(db, "]}");
+}
+
+static void write_target_compile_commands(FILE *db, bool *first, const char *cwd, C_Build *b, C_Target *t, DepState states[], const Options *opt, bool visited[]) {
+    ptrdiff_t target_index = t - b->targets;
+    if (target_index < 0 || (size_t)target_index >= b->target_count) die("invalid target graph");
+    if (visited[target_index]) return;
+    visited[target_index] = true;
+
+    for (size_t i = 0; i < t->target_dep_count; ++i)
+        write_target_compile_commands(db, first, cwd, b, t->target_deps[i], states, opt, visited);
+
+    StrVec sources = {0};
+    for (size_t i = 0; i < t->sources.count; ++i) expand_pattern(t->sources.items[i], &sources);
+
+    uint64_t sig = hash_string(t->name);
+    sig = hash_update(sig, &t->kind, sizeof(t->kind));
+    sig = hash_update(sig, opt->cc, strlen(opt->cc));
+    for (size_t i = 0; i < sources.count; ++i) sig = hash_update(sig, sources.items[i], strlen(sources.items[i]));
+
+    char key[17];
+    hash_hex(sig, key);
+    char objdir[PATH_MAX];
+    snprintf(objdir, sizeof(objdir), "build/.objs/%s", key);
+
+    for (size_t i = 0; i < sources.count; ++i) {
+        char obj[PATH_MAX];
+        object_path(objdir, sources.items[i], obj);
+        StrVec cmd = {0};
+        compiler_flags(&cmd, t, b, states, opt, sources.items[i]);
+        vec_push(&cmd, "-c");
+        vec_push(&cmd, sources.items[i]);
+        vec_push(&cmd, "-o");
+        vec_push(&cmd, obj);
+        write_compile_command(db, first, &cmd, sources.items[i], cwd);
+        vec_free(&cmd);
+    }
+    vec_free(&sources);
+}
+
+static void write_compile_database(C_Build *b, C_Target *t, DepState states[], const Options *opt) {
+    char cwd[PATH_MAX];
+    if (!_getcwd(cwd, sizeof(cwd))) die("cannot determine working directory");
+    slashify(cwd);
+
+    FILE *db = fopen("compile_commands.json", "w");
+    if (!db) return;
+
+    fprintf(db, "[\n");
+    bool first = true;
+    bool visited[C_MAX_TARGETS] = {0};
+    write_target_compile_commands(db, &first, cwd, b, t, states, opt, visited);
+    fprintf(db, "\n]\n");
+    fclose(db);
+}
+
 static int command_build(const Options *opt, bool run) {
     C_Build *b = load_build(opt); DepState *states = new_dep_states(); prepare_dependencies(b, opt, states);
     unsigned char mark[C_MAX_TARGETS] = {0}; char *outputs[C_MAX_TARGETS] = {0}; C_Target *t = select_target(b, opt); char *output = build_target_graph(b, t, states, opt, mark, outputs);
+    write_compile_database(b, t, states, opt);
     int rc = 0;
     if (run) {
         if (t->kind != C_TARGET_EXECUTABLE && t->kind != C_TARGET_TEST) die("target %s is not executable", t->name);
@@ -47,7 +121,7 @@ static int command_update(const Options *opt) {
 
 static int command_deps(const Options *opt) {
     C_Build *b = load_build(opt);
-    if (opt->target && !strcmp(opt->target, "clean")) { char c[PATH_MAX]; cache_root(c); char p[PATH_MAX]; const char *dirs[] = {"git","src","pkg"}; for (size_t i=0;i<C_ARRAY_LEN(dirs);++i){path_join(p,c,dirs[i]); remove_tree(p);} note("CLEAN","dependency cache"); free_build(b); return 0; }
+    if (opt->target && !strcmp(opt->target, "clean")) { char c[PATH_MAX]; cache_root(c); char p[PATH_MAX]; const char *dirs[]={"git","src","pkg"}; for (size_t i=0;i<C_ARRAY_LEN(dirs);++i){path_join(p,c,dirs[i]); remove_tree(p);} note("CLEAN","dependency cache"); free_build(b); return 0; }
     if (opt->target && strcmp(opt->target, "tree")) die("unknown deps action: %s", opt->target);
     if (opt->target) {
         puts("Targets:"); for (size_t i=0;i<b->target_count;++i){printf("  %s\n",b->targets[i].name); for(size_t j=0;j<b->targets[i].dep_count;++j) printf("    -> dependency %s\n",b->targets[i].deps[j]->name);}
