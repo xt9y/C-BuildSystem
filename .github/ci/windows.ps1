@@ -87,9 +87,32 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "c build run failed with exit code $LASTEXITCODE" }
     if ($chainedOutput -notmatch 'Hello from C\.') { throw "unexpected c build run output: $chainedOutput" }
 
+    if (-not (Test-Path 'compile_commands.json')) {
+        throw 'native Windows c build did not create compile_commands.json'
+    }
+    $compileCommands = @(Get-Content 'compile_commands.json' -Raw | ConvertFrom-Json)
+    if ($compileCommands.Count -ne 1) {
+        throw "expected one compile_commands.json entry, got $($compileCommands.Count)"
+    }
+    $compileEntry = $compileCommands[0]
+    if (-not ($compileEntry.file -replace '\\', '/').EndsWith('src/main.c')) {
+        throw "compile_commands.json has wrong source file: $($compileEntry.file)"
+    }
+    if (-not $compileEntry.arguments -or $compileEntry.arguments -notcontains '-std=c11') {
+        throw 'compile_commands.json is missing the native C compile arguments'
+    }
+
     $runOutput = (& c run 2>$null) -join "`n"
     if ($LASTEXITCODE -ne 0) { throw "c run failed with exit code $LASTEXITCODE" }
     if ($runOutput -notmatch 'Hello from C\.') { throw "unexpected c run output: $runOutput" }
+
+    $cachedCompileCommands = @(Get-Content 'compile_commands.json' -Raw | ConvertFrom-Json)
+    if ($cachedCompileCommands.Count -ne 1) {
+        throw "cached c run must retain compile database entries; got $($cachedCompileCommands.Count)"
+    }
+    if (-not $cachedCompileCommands[0].arguments -or $cachedCompileCommands[0].arguments -notcontains '-std=c11') {
+        throw 'cached c run lost the native C compile arguments'
+    }
 
     @'
 #include <cbuild.h>
