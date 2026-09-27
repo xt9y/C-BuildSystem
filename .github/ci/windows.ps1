@@ -106,6 +106,14 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "c run failed with exit code $LASTEXITCODE" }
     if ($runOutput -notmatch 'Hello from C\.') { throw "unexpected c run output: $runOutput" }
 
+    $cachedCompileCommands = @(Get-Content 'compile_commands.json' -Raw | ConvertFrom-Json)
+    if ($cachedCompileCommands.Count -ne 1) {
+        throw "cached c run must retain compile database entries; got $($cachedCompileCommands.Count)"
+    }
+    if (-not $cachedCompileCommands[0].arguments -or $cachedCompileCommands[0].arguments -notcontains '-std=c11') {
+        throw 'cached c run lost the native C compile arguments'
+    }
+
     @'
 #include <cbuild.h>
 
