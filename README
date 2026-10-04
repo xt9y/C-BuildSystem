@@ -4,7 +4,7 @@ C build system written in C.
 
 Benchmarks are published as a release after CI is done
 
-install --> make && sudo make install
+install --> git clone ... && cd C-BuildSystem && make && sudo make install
 build   --> c build
 run     --> c run
 test    --> c test
