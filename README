@@ -7,6 +7,7 @@ works on mac, linux, powershell whatever
 Benchmarks are published as a release after CI is done
 
 install --> git clone ... && cd C-BuildSystem && make && sudo make install
+init    --> c init
 build   --> c build
 run     --> c run
 test    --> c test
