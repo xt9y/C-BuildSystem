@@ -2,6 +2,8 @@ C-BuildSystem
 
 C build system written in C.
 
+works on mac, linux, powershell whatever
+
 Benchmarks are published as a release after CI is done
 
 install --> git clone ... && cd C-BuildSystem && make && sudo make install
