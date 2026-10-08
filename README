@@ -13,3 +13,29 @@ init    --> c init
 build   --> c build
 run     --> c run
 test    --> c test
+
+asset repositories --> add c_git + c_dep_assets; no per-file listing needed
+
+  C_Dependency *models = c_git(b, "models",
+      "https://github.com/xt9y-org/MODELS.git", "main");
+  c_dep_assets(models);
+  c_use(app, models);
+
+  // In application source:
+  // #include <casset.h>
+  // const char *path = c_asset("models", "spacestation.glb");
+  // Nested paths use their exact repository-relative spelling.
+
+  c run                           # all repository files are callable
+  c run -- spacestation.glb       # checks out only this Git asset
+  c update models                 # update the locked revision for new files
+
+For a build configured to expose ONLY specific files:
+
+  c_dep_asset_only(models, "spacestation.glb"); // direct name
+  // or c_dep_asset(models, "path/file.glb", "alias.glb");
+
+Explicit c_dep_asset(...) mappings limit exposed asset names. Sparse,
+blobless Git checkout is used only for asset-only c_dep_assets() dependencies.
+Header/source dependencies with a linked asset keep their normal full checkout.
+Each locked revision and selected asset set has its own source-cache key.
