@@ -257,6 +257,9 @@ static void compiler_asset_runtime_header(const char *project_cache, char includ
 }
 
 static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *state) {
+    // Keep ordinary header/source/CMake/cbuild dependencies unchanged.
+    // Only explicit asset mappings or a c_dep_assets() opt-in need casset.h.
+    if (!d->asset_only && !d->links.count) return;
     if (d->links.count % 2 != 0) die("dependency %s has an invalid asset mapping", d->name);
 
     char project_cache[PATH_MAX], include_dir[PATH_MAX], manifest[PATH_MAX], temp[PATH_MAX], root[PATH_MAX];
