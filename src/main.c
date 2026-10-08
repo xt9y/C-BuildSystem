@@ -752,7 +752,7 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
             if (!dependency_safe_asset_path(d->links.items[j]))
                 die("invalid asset repository path for %s: %s", d->name, d->links.items[j]);
             selection = hash_update(selection, d->links.items[j], strlen(d->links.items[j]));
-            const char zero = '\\0';
+            const char zero = '\0';
             selection = hash_update(selection, &zero, 1);
         }
         snprintf(key_input, sizeof(key_input), "%s:%s:%016llx",
