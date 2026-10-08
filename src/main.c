@@ -643,6 +643,31 @@ static LockEntry *lock_for(LockFile *lock, const C_Dependency *d) {
     return NULL;
 }
 
+/* Asset-only dependencies may request a small set of Git paths. The mirror
+   uses blobless partial clone; only selected file blobs are fetched on checkout.
+   Source, CMake and nested cbuild dependencies keep their full checkouts. */
+static bool dependency_selective_assets(const C_Dependency *d) {
+    return d->links.count > 0 && d->kind == C_DEP_HEADER_ONLY &&
+           d->source_patterns.count == 0 && d->include_dirs.count == 0 &&
+           !d->subdir[0];
+}
+
+static bool dependency_safe_asset_path(const char *path) {
+    if (!path || !*path || *path == '/' || *path == '\\') return false;
+    const char *part = path;
+    for (const char *p = path;; ++p) {
+        if (*p == '\\' || *p == ':' || (unsigned char)*p < 32) return false;
+        if (*p == '/' || !*p) {
+            size_t len = (size_t)(p - part);
+            if (!len || (len == 1 && part[0] == '.') ||
+                (len == 2 && part[0] == '.' && part[1] == '.'))
+                return false;
+            if (!*p) return true;
+            part = p + 1;
+        }
+    }
+}
+
 static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mirror[PATH_MAX]) {
     char cache[PATH_MAX], repos[PATH_MAX], h[17];
     cache_root(cache); path_join(repos, cache, "git"); mkdir_p(repos); hash_hex(d->git, h);
@@ -665,7 +690,9 @@ static void ensure_git_mirror(const C_Dependency *d, const Options *opt, char mi
     if (!is_real_dir(mirror)) {
         char temp[PATH_MAX]; make_private_temp_dir(mirror, temp);
         note("FETCH", "%s", d->name);
-        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, "--depth=1"); vec_push(&a, "--no-single-branch"); vec_push(&a, "--no-local"); vec_push(&a, d->git); vec_push(&a, temp);
+        StrVec a = {0}; vec_push(&a, "git"); vec_push(&a, "clone"); vec_push(&a, "--mirror"); vec_push(&a, "--depth=1"); vec_push(&a, "--no-single-branch"); vec_push(&a, "--no-local");
+        if (dependency_selective_assets(d)) vec_push(&a, "--filter=blob:none");
+        vec_push(&a, d->git); vec_push(&a, temp);
         int rc = run_process(&a, opt->verbose, NULL); vec_free(&a);
         if (rc != 0 || !git_mirror_valid(temp)) {
             (void)remove_tree(temp);
@@ -717,7 +744,22 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
 
     char cache[PATH_MAX], srcroot[PATH_MAX], pkgroot[PATH_MAX], key_input[C_MAX_PATH + 256], key[17];
     cache_root(cache); path_join(srcroot, cache, "src"); path_join(pkgroot, cache, "pkg"); mkdir_p(srcroot); mkdir_p(pkgroot);
-    snprintf(key_input, sizeof(key_input), "%s:%s", d->git, e->resolved);
+    /* Full and path-limited checkouts cannot share a source-cache directory:
+       an earlier one-file checkout must not poison later all-file consumers. */
+    if (dependency_selective_assets(d)) {
+        uint64_t selection = 1469598103934665603ULL;
+        for (size_t j = 0; j < d->links.count; j += 2) {
+            if (!dependency_safe_asset_path(d->links.items[j]))
+                die("invalid asset repository path for %s: %s", d->name, d->links.items[j]);
+            selection = hash_update(selection, d->links.items[j], strlen(d->links.items[j]));
+            const char zero = '\\0';
+            selection = hash_update(selection, &zero, 1);
+        }
+        snprintf(key_input, sizeof(key_input), "%s:%s:%016llx",
+                 d->git, e->resolved, (unsigned long long)selection);
+    } else {
+        snprintf(key_input, sizeof(key_input), "%s:%s", d->git, e->resolved);
+    }
     hash_hex(key_input, key);
     char src_name[C_MAX_NAME + 32]; snprintf(src_name, sizeof(src_name), "%s-%s", d->name, key);
     path_join(state->source, srcroot, src_name);
@@ -746,7 +788,11 @@ static void resolve_dependency(const C_Dependency *d, const Options *opt, LockFi
     }
     if (!is_real_dir(state->source)) {
         char temp_source[PATH_MAX]; make_private_temp_dir(state->source, temp_source);
-        StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, temp_source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--"); vec_push(&co, ".");
+        StrVec co = {0}; vec_push(&co, "git"); vec_push(&co, "--git-dir"); vec_push(&co, mirror); vec_push(&co, "--work-tree"); vec_push(&co, temp_source); vec_push(&co, "checkout"); vec_push(&co, "-f"); vec_push(&co, e->resolved); vec_push(&co, "--");
+        if (dependency_selective_assets(d)) {
+            for (size_t j = 0; j < d->links.count; j += 2)
+                vec_push(&co, d->links.items[j]);
+        } else vec_push(&co, ".");
         int rc = run_process(&co, opt->verbose, NULL); vec_free(&co);
         if (rc != 0) {
             (void)remove_tree(temp_source);
