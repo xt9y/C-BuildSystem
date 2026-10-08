@@ -70,6 +70,7 @@ typedef struct C_Dependency {
     char ref[C_MAX_NAME];
     char subdir[C_MAX_PATH];
     C_DepKind kind;
+    int asset_only; /* opted-in: selected mappings may use sparse Git checkout */
     C_StringList links;          /* internal paired source/destination storage for c_dep_asset */
     C_StringList include_dirs;
     C_StringList source_patterns;
@@ -300,12 +301,25 @@ static inline void c_dep_include(C_Dependency *d, const char *path) { if (!d) c_
 static inline void c_dep_sources(C_Dependency *d, const char *pattern) { if (!d) c__fatal("c_dep_sources received a null dependency"); c__push(&d->source_patterns, pattern); }
 static inline void c_dep_subdir(C_Dependency *d, const char *path) { if (!d) c__fatal("c_dep_subdir received a null dependency"); c__copy(d->subdir, sizeof(d->subdir), path); }
 static inline void c_dep_flag(C_Dependency *d, const char *flag) { if (!d) c__fatal("c_dep_flag received a null dependency"); c__push(&d->compile_flags, flag); }
+/* Explicitly marks a Git dependency as a repository of assets. By default
+   every repository-relative file is addressable through c_asset(). If specific
+   assets are mapped, only those Git paths are checked out. */
+static inline void c_dep_assets(C_Dependency *d) {
+    if (!d) c__fatal("c_dep_assets received a null dependency");
+    d->asset_only = 1;
+}
 static inline void c_dep_asset(C_Dependency *d, const char *source, const char *destination) {
     if (!d) c__fatal("c_dep_asset received a null dependency");
     if (!source || !source[0]) c__fatal("c_dep_asset source is empty");
     if (!destination || !destination[0]) c__fatal("c_dep_asset destination is empty");
     c__push(&d->links, source);
     c__push(&d->links, destination);
+}
+
+static inline void c_dep_asset_only(C_Dependency *d, const char *path) {
+    if (!d || !path || !path[0]) c__fatal("c_dep_asset_only needs a valid path");
+    c_dep_assets(d);
+    c_dep_asset(d, path, path);
 }
 
 static inline void c_use(C_Target *t, C_Dependency *d) {
