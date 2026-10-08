@@ -647,7 +647,7 @@ static LockEntry *lock_for(LockFile *lock, const C_Dependency *d) {
    uses blobless partial clone; only selected file blobs are fetched on checkout.
    Source, CMake and nested cbuild dependencies keep their full checkouts. */
 static bool dependency_selective_assets(const C_Dependency *d) {
-    return d->links.count > 0 && d->kind == C_DEP_HEADER_ONLY &&
+    return d->asset_only && d->links.count > 0 && d->kind == C_DEP_HEADER_ONLY &&
            d->source_patterns.count == 0 && d->include_dirs.count == 0 &&
            !d->subdir[0];
 }
