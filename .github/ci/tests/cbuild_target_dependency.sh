@@ -70,7 +70,13 @@ SRC
     C_INCLUDE_DIR="$INC" "$C_BIN" build
 
     if [ "$(uname -s)" = Darwin ]; then
-        test "$(otool -D "$LIB/build/debug/libdependency.dylib" | tail -n +2)" = '@rpath/libdependency.dylib'
+        # cbuild dependencies are intentionally compiled in their pinned
+        # source cache, NOT in the developer's original Git repository.
+        # The previous test incorrectly inspected $LIB/build (which is absent).
+        asset_cache="${C_CACHE_DIR:-$HOME/Library/Caches/c}"
+        cached_lib="$(find "$asset_cache/src" -type f -name libdependency.dylib -print -quit)"
+        [ -n "$cached_lib" ] && [ -f "$cached_lib" ]
+        test "$(otool -D "$cached_lib" | tail -n +2)" = '@rpath/libdependency.dylib'
         otool -L ./build/debug/app | grep -q '@rpath/libdependency.dylib'
     else
         ldd ./build/debug/app | grep -q 'libdependency.so'
