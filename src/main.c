@@ -656,7 +656,7 @@ static bool dependency_safe_asset_path(const char *path) {
     if (!path || !*path || *path == '/' || *path == '\\') return false;
     const char *part = path;
     for (const char *p = path;; ++p) {
-        if (*p == '\\' || *p == ':' || (unsigned char)*p < 32) return false;
+        if (*p == '\\' || *p == ':' || (*p && (unsigned char)*p < 32)) return false;
         if (*p == '/' || !*p) {
             size_t len = (size_t)(p - part);
             if (!len || (len == 1 && part[0] == '.') ||
