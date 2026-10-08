@@ -208,7 +208,7 @@ static void compiler_asset_runtime_header(const char *project_cache, char includ
          "    if (!path || !*path || *path == '/' || *path == '\\\\') return 0;\n"
          "    const char *part = path;\n"
          "    for (const char *p = path;; ++p) {\n"
-         "        if (*p == '\\\\' || *p == ':' || (unsigned char)*p < 32) return 0;\n"
+         "        if (*p == '\\\\' || *p == ':' || (*p && (unsigned char)*p < 32)) return 0;\n"
          "        if (*p == '/' || !*p) {\n"
          "            size_t n = (size_t)(p - part);\n"
          "            if (!n || (n == 1 && part[0] == '.') ||\n"
