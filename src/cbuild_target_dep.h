@@ -204,10 +204,24 @@ static void compiler_asset_runtime_header(const char *project_cache, char includ
         "    }\n"
         "    return 0;\n"
         "}\n"
+         "static inline int c_asset__relative(const char *path) {\n"
+         "    if (!path || !*path || *path == '/' || *path == '\\\\') return 0;\n"
+         "    const char *part = path;\n"
+         "    for (const char *p = path;; ++p) {\n"
+         "        if (*p == '\\\\' || *p == ':' || (unsigned char)*p < 32) return 0;\n"
+         "        if (*p == '/' || !*p) {\n"
+         "            size_t n = (size_t)(p - part);\n"
+         "            if (!n || (n == 1 && part[0] == '.') ||\n"
+         "                (n == 2 && part[0] == '.' && part[1] == '.')) return 0;\n"
+         "            if (!*p) return 1;\n"
+         "            part = p + 1;\n"
+         "        }\n"
+         "    }\n"
+         "}\n"
         "static inline const char *c_asset(const char *dependency, const char *logical_path) {\n"
         "    if (!dependency || !logical_path) return NULL;\n"
         "    C_ASSET_THREAD_LOCAL static char physical[C_ASSET_PATH_MAX];\n"
-        "    char manifest[C_ASSET_PATH_MAX], logical[C_ASSET_PATH_MAX];\n"
+         "    char manifest[C_ASSET_PATH_MAX], logical[C_ASSET_PATH_MAX], mapped[C_ASSET_PATH_MAX];\n"
         "    int n = snprintf(manifest, sizeof(manifest), \"%s/%016llx.bin\", C_ASSET_MANIFEST_ROOT,\n"
         "                     (unsigned long long)c_asset__hash(dependency));\n"
         "    if (n < 0 || n >= (int)sizeof(manifest)) return NULL;\n"
@@ -216,9 +230,19 @@ static void compiler_asset_runtime_header(const char *project_cache, char includ
         "    for (;;) {\n"
         "        int left = c_asset__read0(file, logical, sizeof(logical));\n"
         "        if (left <= 0) break;\n"
-        "        int right = c_asset__read0(file, physical, sizeof(physical));\n"
-        "        if (right <= 0) break;\n"
-        "        if (!strcmp(logical, logical_path)) { fclose(file); return physical; }\n"
+         "        int right = c_asset__read0(file, mapped, sizeof(mapped));\n"
+         "        if (right <= 0) break;\n"
+         "        if (!strcmp(logical, logical_path)) {\n"
+         "            snprintf(physical, sizeof(physical), \"%s\", mapped);\n"
+         "            fclose(file); return physical;\n"
+         "}\n"
+         "        if (!strcmp(logical, \"@cbuild:repo\") && c_asset__relative(logical_path)) {\n"
+         "            n = snprintf(physical, sizeof(physical), \"%s/%s\", mapped, logical_path);\n"
+         "            if (n > 0 && n < (int)sizeof(physical)) {\n"
+         "                FILE *asset = fopen(physical, \"rb\");\n"
+         "                if (asset) { fclose(asset); fclose(file); return physical; }\n"
+         "            }\n"
+         "        }\n"
         "    }\n"
         "    fclose(file);\n"
         "    return NULL;\n"
@@ -233,7 +257,6 @@ static void compiler_asset_runtime_header(const char *project_cache, char includ
 }
 
 static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *state) {
-    if (!d->links.count) return;
     if (d->links.count % 2 != 0) die("dependency %s has an invalid asset mapping", d->name);
 
     char project_cache[PATH_MAX], include_dir[PATH_MAX], manifest[PATH_MAX], temp[PATH_MAX], root[PATH_MAX];
@@ -246,6 +269,14 @@ static void compiler_publish_dependency_assets(C_Dependency *d, const DepState *
 
     FILE *file = fopen(temp, "wb");
     if (!file) die("cannot create asset manifest for %s: %s", d->name, strerror(errno));
+    /* No mappings means every file is addressable by its repository-relative
+       name. Explicit c_dep_asset mappings restrict the exposed asset set. */
+    if (!d->links.count) {
+        const char any[] = "@cbuild:repo";
+        if (fwrite(any, 1, sizeof(any), file) != sizeof(any) ||
+            fwrite(root, 1, strlen(root) + 1, file) != strlen(root) + 1)
+            die("cannot write default repository asset mapping for %s", d->name);
+    }
     for (size_t i = 0; i < d->links.count; i += 2) {
         char relative_source[PATH_MAX], logical[PATH_MAX], physical[PATH_MAX];
         c__copy(relative_source, sizeof(relative_source), d->links.items[i]);
